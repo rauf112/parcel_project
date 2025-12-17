@@ -213,6 +213,9 @@ def get_rule(zone_code: str) -> ZoneRule:
     z = canonical_zone(zone_code)
     rule = ZONE_RULES.get(z)
     if rule is None:
-        print(f"[WARN] Zone rule not found for zone='{zone_code}' (canonical='{z}'). Using DEFAULT_RULE.")
+        print(
+            f"[AVISO] No se encontró normativa para la zona '{zone_code}' "
+            f"(canónica='{z}'). Se utilizará la regla por defecto."
+        )
         return DEFAULT_RULE
     return rule

@@ -1,20 +1,30 @@
 # cadastre_client.py
+from __future__ import annotations
+
 import requests
 import xml.etree.ElementTree as ET
 from typing import List, Tuple
 
-# Endpoint INSPIRE Catastro
+# ✅ Catastro INSPIRE WFS endpoint
 WFS_URL = "https://ovc.catastro.meh.es/INSPIRE/wfsCP.aspx"
+
+
+def _preview(text: str, n: int = 600) -> str:
+    text = (text or "").strip()
+    return text[:n] + ("..." if len(text) > n else "")
 
 
 def get_parcel_polygon_by_local_id(local_id: str) -> List[Tuple[float, float]]:
     """
-    Obtiene el polígono de una parcela desde el WFS INSPIRE del Catastro
-    usando el refcat/localId.
+    Catastro INSPIRE WFS üzerinden, refcat/local_id ile parsel polygon'u çeker.
+    Dönüş: [(lon, lat), ...]  EPSG:4326
 
-    Retorna: [(lon, lat), ...] en EPSG:4326
+    StoredQuery: GetParcel + refcat paramı.
+    Not: Bazı cevaplarda posList sırası lat lon lat lon ... gelebiliyor (biz öyle parse ediyoruz).
     """
-    local_id = local_id.strip()
+    local_id = (local_id or "").strip()
+    if not local_id:
+        raise ValueError("local_id (refcat) boş olamaz.")
 
     params = {
         "service": "WFS",
@@ -25,60 +35,92 @@ def get_parcel_polygon_by_local_id(local_id: str) -> List[Tuple[float, float]]:
         "srsname": "EPSG:4326",
     }
 
-    print(f"LocalId (refcat) enviado al WFS: {local_id}")
+    headers = {
+        # Bazı kamu servisleri default Python UA'yı sevmiyor; HTML/redirect dönebiliyor.
+        "User-Agent": "Mozilla/5.0 (ParcelEnvelopeIFC/1.0)"
+    }
 
-    resp = requests.get(WFS_URL, params=params, timeout=30)
+    print("LocalId (refcat) enviado al WFS:", local_id)
 
+    resp = requests.get(WFS_URL, params=params, headers=headers, timeout=30)
+
+    # HTTP hata
     if resp.status_code != 200:
         raise RuntimeError(
-            f"Error HTTP del WFS: {resp.status_code}\n"
+            f"WFS HTTP {resp.status_code}\n"
             f"URL: {resp.url}\n"
-            f"Contenido (primeros 500 caracteres):\n{resp.text[:500]}"
+            f"Body (preview):\n{_preview(resp.text)}"
         )
 
-    root = ET.fromstring(resp.content)
+    # Content-Type kontrolü (maintenance sırasında HTML dönebiliyor)
+    content_type = (resp.headers.get("Content-Type") or "").lower()
+    if "html" in content_type:
+        raise RuntimeError(
+            "El WFS devolvió HTML en vez de XML (posible mantenimiento/caída del servicio).\n"
+            f"URL: {resp.url}\n"
+            f"Body (preview):\n{_preview(resp.text)}"
+        )
+
+    # XML parse (bozuk XML yakala)
+    try:
+        root = ET.fromstring(resp.content)
+    except ET.ParseError as e:
+        raise RuntimeError(
+            "Respuesta del WFS no es XML válido (posible mantenimiento/errores del servidor).\n"
+            f"Error: {e}\n"
+            f"URL: {resp.url}\n"
+            f"Body (preview):\n{_preview(resp.text)}"
+        ) from e
 
     ns = {
         "wfs": "http://www.opengis.net/wfs/2.0",
         "gml": "http://www.opengis.net/gml/3.2",
         "cp": "http://inspire.ec.europa.eu/schemas/cp/4.0",
         "base": "http://inspire.ec.europa.eu/schemas/base/3.3",
+        "ows": "http://www.opengis.net/ows/1.1",
     }
+
+    # WFS ExceptionReport kontrolü (XML ama hata olabilir)
+    exc_text = root.findtext(".//ows:ExceptionText", default="", namespaces=ns).strip()
+    if exc_text:
+        raise ValueError(
+            "El WFS devolvió un error (ExceptionReport).\n"
+            f"Detalle: {exc_text}\n"
+            f"URL: {resp.url}"
+        )
 
     parcels = root.findall(".//cp:CadastralParcel", ns)
     if not parcels:
         raise ValueError(
-            "No se ha encontrado ningún elemento CadastralParcel. "
-            "Revisa el formato de la respuesta del WFS."
+            "No se encontró <cp:CadastralParcel> en la respuesta.\n"
+            f"URL: {resp.url}\n"
+            f"Body (preview):\n{_preview(resp.text)}"
         )
 
     pos_list_elem = parcels[0].find(".//gml:posList", ns)
-    if pos_list_elem is None or not pos_list_elem.text:
-        raise ValueError("No se ha encontrado el elemento gml:posList.")
+    if pos_list_elem is None or not (pos_list_elem.text or "").strip():
+        raise ValueError("No se encontró gml:posList para la geometría de la parcela.")
 
     numbers = pos_list_elem.text.split()
     if len(numbers) % 2 != 0:
-        raise ValueError(
-            "El número de coordenadas en posList no es par."
-        )
+        raise ValueError("posList contiene un número impar de valores (esperado lat/lon en pares).")
 
     coords: List[Tuple[float, float]] = []
-
-    # INSPIRE suele devolver: lat lon lat lon ...
+    # Senin örneklerde posList: lat lon lat lon ... geliyordu
     for i in range(0, len(numbers), 2):
         lat = float(numbers[i])
         lon = float(numbers[i + 1])
         coords.append((lon, lat))
 
-    # Cerrar el polígono si no viene cerrado
+    # Kapalı ring garantisi
     if coords and coords[0] != coords[-1]:
         coords.append(coords[0])
 
-    print(f"Se han leído {len(coords)} vértices del polígono de la parcela.")
     return coords
 
 
 if __name__ == "__main__":
-    test_id = input("Introduce un localId (refcat) para prueba: ").strip()
+    test_id = input("Introduce el localId de la parcela (refcat): ").strip()
     pts = get_parcel_polygon_by_local_id(test_id)
-    print("Primeras coordenadas:", pts[:5], "...")
+    print(f"Se han leído {len(pts)} vértices de la parcela.")
+    print("Primeros puntos:", pts[:5], "...")

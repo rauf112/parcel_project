@@ -11,6 +11,10 @@ from ifc_exporter import create_ifc_envelope
 
 
 def bbox_size_m(coords_lonlat: List[Tuple[float, float]]) -> Tuple[float, float]:
+    """
+    Calcula el tamaño del bounding box en metros (EPSG:25831).
+    Retorna: (ancho_m, profundidad_m)
+    """
     transformer = Transformer.from_crs("EPSG:4326", "EPSG:25831", always_xy=True)
 
     xs, ys = [], []
@@ -23,6 +27,9 @@ def bbox_size_m(coords_lonlat: List[Tuple[float, float]]) -> Tuple[float, float]
 
 
 def bbox_footprint(coords_lonlat: List[Tuple[float, float]]) -> List[Tuple[float, float]]:
+    """
+    Genera un footprint rectangular simple (EPSG:25831) para el envelope IFC.
+    """
     transformer = Transformer.from_crs("EPSG:4326", "EPSG:25831", always_xy=True)
 
     xs, ys = [], []
@@ -45,11 +52,21 @@ def bbox_footprint(coords_lonlat: List[Tuple[float, float]]) -> List[Tuple[float
 def main() -> None:
     refcat = input("Introduce el localId de la parcela (refcat): ").strip()
     if not refcat:
-        raise ValueError("El localId (refcat) no puede estar vacío.")
+        print("[ERROR] El refcat no puede estar vacío.")
+        return
 
-    coords_lonlat = get_parcel_polygon_by_local_id(refcat)
+    # 1) Catastro: obtener polígono de la parcela
+    try:
+        coords_lonlat = get_parcel_polygon_by_local_id(refcat)
+    except Exception as e:
+        print("[ERROR] No se pudo obtener la parcela desde el WFS del Catastro.")
+        print("Motivo:", str(e))
+        print("Sugerencia: el servicio puede estar en mantenimiento. Inténtalo más tarde.")
+        return
+
     print(f"Se han leído {len(coords_lonlat)} vértices de la parcela.")
 
+    # 2) POUM: refcat -> zona
     idx = build_refcat_to_poum_index("POUM.gml")
     poum_info = idx.get(refcat)
 
@@ -57,6 +74,7 @@ def main() -> None:
     zone_key = canonical_zone(zone_raw)
     print(f"Zona urbanística: {zone_key}")
 
+    # 3) Bounding box y footprint
     width_m, depth_m = bbox_size_m(coords_lonlat)
     footprint = bbox_footprint(coords_lonlat)
 
@@ -65,26 +83,29 @@ def main() -> None:
         f"{width_m:.2f} m x {depth_m:.2f} m"
     )
 
+    # 4) Normativa urbanística (con fallback)
     rule = get_rule(zone_key)
 
-    max_depth_m = (
+    building_depth_m = (
         rule.max_building_depth_m
         if rule.max_building_depth_m is not None
         else depth_m
     )
-    max_height_m = rule.max_reg_height_m
+    building_height_m = rule.max_reg_height_m
 
-    print(f"Profundidad edificable (según normativa): {max_depth_m:.2f} m")
-    print(f"Altura reguladora (según normativa): {max_height_m:.2f} m")
+    print(f"Profundidad edificable (según normativa): {building_depth_m:.2f} m")
+    print(f"Altura reguladora (según normativa): {building_height_m:.2f} m")
 
-    if max_height_m <= 0.0 or max_depth_m <= 0.0:
+    # 5) Zona no edificable
+    if building_height_m <= 0.0 or building_depth_m <= 0.0:
         print("[INFO] Parcela no edificable. No se genera archivo IFC.")
         return
 
+    # 6) Generar IFC
     out_path = f"malgrat_{refcat}_{zone_key}_envelope.ifc"
     create_ifc_envelope(
         footprint_points=footprint,
-        height=max_height_m,
+        height=building_height_m,
         zone_key=zone_key,
         out_path=out_path,
     )

@@ -8,43 +8,17 @@ from typing import Optional, Dict
 
 @dataclass
 class PoumInfo:
-    zone: Optional[str] = None          # C_QUAL_AJT (örn 12a, 13b, 6b, 12-2...)
-    altmax_m: Optional[float] = None    # ALTMAX
-    profedif_m: Optional[float] = None  # PROFEDIF (tek sayı ya da "13-13,3")
-    numplamax: Optional[str] = None     # NUMPLAMAX (örn PB+4P)
-
-
-def _parse_float_maybe(text: Optional[str]) -> Optional[float]:
-    if text is None:
-        return None
-    t = text.strip()
-    if not t:
-        return None
-
-    t = t.replace(",", ".")  # 13,3 -> 13.3
-
-    # "13-13,3" gibi aralık gelirse max'ı al
-    if "-" in t:
-        parts = [p.strip() for p in t.split("-") if p.strip()]
-        vals = []
-        for p in parts:
-            try:
-                vals.append(float(p))
-            except:
-                pass
-        return max(vals) if vals else None
-
-    try:
-        return float(t)
-    except:
-        return None
+    zone: Optional[str] = None  # C_QUAL_AJT (örn 12a, 13b, 6b, 12-2...)
 
 
 def build_refcat_to_poum_index(poum_gml_path: str) -> Dict[str, PoumInfo]:
     """
     POUM.gml içinden:
-      RC (virgülle ayrılmış olabilir) -> PoumInfo
+      RC (virgülle ayrılmış olabilir) -> PoumInfo(zone=...)
     sözlüğü üretir.
+
+    Bu projede şu an sadece zone eşlemesi gerektiği için
+    ALTMAX/PROFEDIF/NUMPLAMAX vb. alanlar bilerek kaldırıldı.
     """
     tree = ET.parse(poum_gml_path)
     root = tree.getroot()
@@ -61,21 +35,14 @@ def build_refcat_to_poum_index(poum_gml_path: str) -> Dict[str, PoumInfo]:
             continue
         feat = fm[0]
 
-        zone = feat.findtext("ogr:C_QUAL_AJT", default=None, namespaces=ns)
-        altmax = _parse_float_maybe(feat.findtext("ogr:ALTMAX", default=None, namespaces=ns))
-        profedif = _parse_float_maybe(feat.findtext("ogr:PROFEDIF", default=None, namespaces=ns))
-        numplamax = feat.findtext("ogr:NUMPLAMAX", default=None, namespaces=ns)
-
         rc_text = feat.findtext("ogr:RC", default=None, namespaces=ns)
         if not rc_text:
             continue
 
-        info = PoumInfo(
-            zone=zone.strip() if zone else None,
-            altmax_m=altmax,
-            profedif_m=profedif,
-            numplamax=numplamax.strip() if numplamax else None
-        )
+        zone_text = feat.findtext("ogr:C_QUAL_AJT", default=None, namespaces=ns)
+        zone = zone_text.strip() if zone_text else None
+
+        info = PoumInfo(zone=zone)
 
         for rc in [x.strip() for x in rc_text.split(",")]:
             if rc:

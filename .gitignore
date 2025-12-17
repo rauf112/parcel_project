@@ -1,0 +1,25 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# VS Code history
+.history/
+
+# IFC outputs
+*.ifc
+
+# GML
+*.gml
+!POUM.gml
+
+# Logs & temp
+*.log
+*.tmp
+
+# VS Code
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db

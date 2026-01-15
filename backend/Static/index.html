@@ -1,0 +1,400 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Parcel BIM/GIS Automation</title>
+  <style>
+    :root { --border:#d9dde3; --bg:#f6f7f9; --text:#111827; --muted:#6b7280; --primary:#1f6feb; --ok:#059669; --err:#dc2626;}
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial; margin:0; background:var(--bg); color:var(--text); }
+    .wrap { max-width: 980px; margin: 28px auto; padding: 0 16px; }
+    .grid { display:grid; grid-template-columns: 360px 1fr; gap: 16px; align-items:start; }
+    .card { background:#fff; border:1px solid var(--border); border-radius: 10px; box-shadow: 0 1px 2px rgba(0,0,0,.04); }
+    .card h2 { margin:0; padding: 14px 16px; border-bottom:1px solid var(--border); font-size: 16px; }
+    .content { padding: 16px; }
+    label { display:block; font-size: 13px; color: var(--muted); margin-bottom: 6px; }
+    select, button { width:100%; padding:10px 10px; border-radius: 8px; border:1px solid var(--border); font-size: 14px; background:#fff; }
+    select:disabled { background:#f3f4f6; color:#9ca3af; }
+    .row { margin-bottom: 14px; }
+    .checkbox { display:flex; align-items:center; gap:10px; margin: 10px 0 14px; user-select:none; }
+    .checkbox input { width:16px; height:16px; }
+    .btn { background: var(--primary); border:1px solid #1a5dd1; color:#fff; font-weight:600; cursor:pointer; }
+    .btn:disabled { opacity:.55; cursor:not-allowed; }
+    .status { margin-top: 10px; font-size: 13px; }
+    .ok { color: var(--ok); }
+    .err { color: var(--err); }
+    .muted { color: var(--muted); }
+    .pill { display:inline-block; padding: 2px 8px; border-radius:999px; border:1px solid var(--border); font-size:12px; color:var(--muted); }
+    .progress { height: 10px; background:#eef2ff; border:1px solid var(--border); border-radius:999px; overflow:hidden; }
+    .bar { height: 100%; width:0%; background: var(--primary); transition: width .2s ease; }
+    .logs { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; background:#0b1220; color:#d1d5db; padding: 12px; border-radius: 10px; overflow:auto; max-height: 260px; border:1px solid #101827; }
+    .files a { color: var(--primary); text-decoration:none; }
+    .files a:hover { text-decoration:underline; }
+    .small { font-size:12px; }
+  </style>
+</head>
+
+<body>
+  <div class="wrap">
+    <h1 style="margin:0 0 12px;">Parcel BIM/GIS Automation</h1>
+    <div class="grid">
+      <div class="card">
+        <h2>Generator</h2>
+        <div class="content">
+          <div class="row">
+            <label for="municipality">Select municipality</label>
+            <select id="municipality">
+              <option value="">Select</option>
+            </select>
+          </div>
+
+          <div class="checkbox">
+            <input type="checkbox" id="allParcels" />
+            <div>
+              <div style="font-weight:600;">All parcels</div>
+              <div class="small muted">If checked, generates IFC for all parcels in the municipality.</div>
+            </div>
+          </div>
+
+          <div class="row">
+            <label for="refcat">Select cadastral reference</label>
+            <select id="refcat" disabled>
+              <option value="">Select</option>
+            </select>
+            <div class="small muted" id="refHint" style="margin-top:6px;">
+              Select a municipality first.
+            </div>
+          </div>
+
+          <button id="generateBtn" class="btn" disabled>Generate IFC</button>
+
+          <div class="status" id="status"></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Run status <span class="pill" id="jobPill">idle</span></h2>
+        <div class="content">
+          <div class="row">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
+              <div class="small muted">Progress</div>
+              <div class="small muted" id="progressText">0%</div>
+            </div>
+            <div class="progress"><div class="bar" id="bar"></div></div>
+          </div>
+
+          <div class="row">
+            <div class="small muted" style="margin-bottom:6px;">Logs</div>
+            <div class="logs" id="logs">(no logs)</div>
+          </div>
+
+          <div class="row">
+            <div class="small muted" style="margin-bottom:6px;">Outputs</div>
+            <div class="files" id="files">(no files)</div>
+          </div>
+
+          <div class="small muted">
+            API docs: <a href="/docs" target="_blank" rel="noreferrer">/docs</a>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+<script>
+  const municipalityEl = document.getElementById("municipality");
+  const allParcelsEl = document.getElementById("allParcels");
+  const refcatEl = document.getElementById("refcat");
+  const refHintEl = document.getElementById("refHint");
+  const generateBtn = document.getElementById("generateBtn");
+  const statusEl = document.getElementById("status");
+
+  const jobPill = document.getElementById("jobPill");
+  const logsEl = document.getElementById("logs");
+  const filesEl = document.getElementById("files");
+  const barEl = document.getElementById("bar");
+  const progressTextEl = document.getElementById("progressText");
+
+  let pollTimer = null;
+  let currentJobId = null;
+
+  function setStatus(msg, type="muted") {
+    statusEl.className = "status " + (type === "ok" ? "ok" : type === "err" ? "err" : "muted");
+    statusEl.textContent = msg || "";
+  }
+
+  function setJobState(state) {
+    jobPill.textContent = state;
+  }
+
+  function setProgress01(p01) {
+    const pct = Math.round((p01 || 0) * 100);
+    barEl.style.width = pct + "%";
+    progressTextEl.textContent = pct + "%";
+  }
+
+  function setLogs(lines) {
+    if (!lines || !lines.length) {
+      logsEl.textContent = "(no logs)";
+      return;
+    }
+    logsEl.textContent = lines.join("\n");
+    logsEl.scrollTop = logsEl.scrollHeight;
+  }
+
+  function setFiles(files) {
+    if (!files || !files.length) {
+      filesEl.textContent = "(no files)";
+      return;
+    }
+    filesEl.innerHTML = "";
+    const ul = document.createElement("ul");
+    ul.style.margin = "0";
+    ul.style.paddingLeft = "18px";
+    for (const f of files) {
+      const li = document.createElement("li");
+      const a = document.createElement("a");
+      a.href = f.download_url || "#";
+      a.textContent = f.file || f.path || "output";
+      a.target = "_blank";
+      a.rel = "noreferrer";
+      li.appendChild(a);
+
+      if (f.path) {
+        const p = document.createElement("div");
+        p.className = "small muted";
+        p.textContent = f.path;
+        li.appendChild(p);
+      }
+      ul.appendChild(li);
+    }
+    filesEl.appendChild(ul);
+  }
+
+  function lockUI(isLocked) {
+    municipalityEl.disabled = isLocked;
+    allParcelsEl.disabled = isLocked;
+
+    // refcat state depends on checkbox + municipality
+    if (isLocked) {
+      refcatEl.disabled = true;
+    } else {
+      const hasMunicipality = !!municipalityEl.value;
+      if (!hasMunicipality) {
+        refcatEl.disabled = true;
+      } else {
+        refcatEl.disabled = allParcelsEl.checked;
+      }
+    }
+
+    generateBtn.disabled = isLocked || !canGenerate();
+    generateBtn.textContent = isLocked ? "Generating..." : "Generate IFC";
+  }
+
+  function canGenerate() {
+    const m = municipalityEl.value;
+    if (!m) return false;
+    if (allParcelsEl.checked) return true;
+    return !!refcatEl.value;
+  }
+
+  async function apiGet(url) {
+    const res = await fetch(url, { headers: { "Accept": "application/json" }});
+    if (!res.ok) {
+      const text = await res.text().catch(()=>"");
+      throw { status: res.status, text };
+    }
+    return res.json();
+  }
+
+  async function apiPost(url, body) {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Accept": "application/json", "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(()=>"");
+      throw { status: res.status, text };
+    }
+    return res.json();
+  }
+
+  function prettyServiceError(err) {
+    // WFS bakımda/HTML döndürme gibi durumlarda backend genelde 503/502 döndürür
+    if (err && (err.status === 502 || err.status === 503)) {
+      return "Service unavailable (WFS/POUM service). Try again later.";
+    }
+    if (err && err.status === 422) return "Validation error (check inputs).";
+    return "Request failed. See console for details.";
+  }
+
+  async function loadMunicipalities() {
+    setStatus("Loading municipalities...");
+    try {
+      const data = await apiGet("/municipalities");
+      municipalityEl.innerHTML = `<option value="">Select</option>`;
+      for (const m of data) {
+        const opt = document.createElement("option");
+        opt.value = m;
+        opt.textContent = m;
+        municipalityEl.appendChild(opt);
+      }
+      setStatus("");
+    } catch (e) {
+      console.error(e);
+      setStatus(prettyServiceError(e), "err");
+    }
+  }
+
+  async function loadParcels(municipality) {
+    refcatEl.innerHTML = `<option value="">Select</option>`;
+    if (!municipality) return;
+
+    refHintEl.textContent = "Loading parcels...";
+    try {
+      const list = await apiGet(`/parcels?municipality=${encodeURIComponent(municipality)}`);
+      for (const rc of list) {
+        const opt = document.createElement("option");
+        opt.value = rc;
+        opt.textContent = rc;
+        refcatEl.appendChild(opt);
+      }
+      refHintEl.textContent = list.length ? `Loaded ${list.length} parcels.` : "No parcels found.";
+    } catch (e) {
+      console.error(e);
+      refHintEl.textContent = "Failed to load parcels.";
+      setStatus(prettyServiceError(e), "err");
+    }
+  }
+
+  async function startGenerate() {
+    if (!canGenerate()) return;
+
+    // reset right panel
+    setJobState("running");
+    setProgress01(0);
+    setLogs(["Job started"]);
+    setFiles([]);
+    setStatus("");
+
+    lockUI(true);
+
+    const body = {
+      municipality: municipalityEl.value,
+      all_parcels: allParcelsEl.checked,
+      refcat: refcatEl.value || null,
+    };
+
+    try {
+      const resp = await apiPost("/generate", body);
+      currentJobId = resp.job_id;
+      setJobState("running");
+      beginPolling(currentJobId);
+    } catch (e) {
+      console.error(e);
+      setJobState("error");
+      lockUI(false);
+      setStatus(prettyServiceError(e), "err");
+    }
+  }
+
+  function beginPolling(jobId) {
+    if (pollTimer) clearInterval(pollTimer);
+
+    pollTimer = setInterval(async () => {
+      try {
+        const st = await apiGet(`/jobs/${encodeURIComponent(jobId)}`);
+
+        setProgress01(st.progress ?? 0);
+        setLogs(st.logs || []);
+        setFiles(st.files || []);
+
+        if (st.status === "success") {
+          setJobState("success");
+          lockUI(false);
+          setStatus("Success. Files are ready.", "ok");
+          clearInterval(pollTimer);
+          pollTimer = null;
+          return;
+        }
+        if (st.status === "error") {
+          setJobState("error");
+          lockUI(false);
+          setStatus(st.message || "Job failed.", "err");
+          clearInterval(pollTimer);
+          pollTimer = null;
+          return;
+        }
+      } catch (e) {
+        console.error(e);
+        // polling error (server restart etc.)
+        setStatus("Lost connection while polling job. Try refreshing.", "err");
+        setJobState("error");
+        lockUI(false);
+        clearInterval(pollTimer);
+        pollTimer = null;
+      }
+    }, 1000);
+  }
+
+  // UI behavior wiring
+  municipalityEl.addEventListener("change", async () => {
+    const m = municipalityEl.value;
+
+    // reset selection
+    refcatEl.value = "";
+    await loadParcels(m);
+
+    // enable/disable refcat
+    const hasM = !!m;
+    if (!hasM) {
+      refcatEl.disabled = true;
+      refHintEl.textContent = "Select a municipality first.";
+    } else {
+      refcatEl.disabled = allParcelsEl.checked;
+      if (allParcelsEl.checked) refHintEl.textContent = "All parcels selected (refcat not required).";
+    }
+
+    generateBtn.disabled = !canGenerate();
+  });
+
+  allParcelsEl.addEventListener("change", () => {
+    const hasM = !!municipalityEl.value;
+
+    if (!hasM) {
+      refcatEl.disabled = true;
+      refHintEl.textContent = "Select a municipality first.";
+    } else {
+      if (allParcelsEl.checked) {
+        refcatEl.disabled = true;
+        refcatEl.value = "";
+        refHintEl.textContent = "All parcels selected (refcat not required).";
+      } else {
+        refcatEl.disabled = false;
+        refHintEl.textContent = "Pick a cadastral reference.";
+      }
+    }
+
+    generateBtn.disabled = !canGenerate();
+  });
+
+  refcatEl.addEventListener("change", () => {
+    generateBtn.disabled = !canGenerate();
+  });
+
+  generateBtn.addEventListener("click", startGenerate);
+
+  // init
+  (async function init() {
+    lockUI(false);
+    await loadMunicipalities();
+    setJobState("idle");
+    setProgress01(0);
+    setLogs([]);
+    setFiles([]);
+    generateBtn.disabled = true;
+  })();
+</script>
+</body>
+</html>

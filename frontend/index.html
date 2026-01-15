@@ -1,0 +1,259 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Parcel IFC Generator</title>
+  <style>
+    body { font-family: Arial, sans-serif; background:#f6f7fb; padding:30px; }
+    .card { width:320px; background:#fff; border:1px solid #dfe3ee; border-radius:8px; padding:18px; box-shadow:0 4px 14px rgba(0,0,0,.06); }
+    label { display:block; font-size:13px; color:#222; margin:10px 0 6px; font-weight:600; }
+    select, button { width:100%; padding:10px; border-radius:6px; border:1px solid #cfd6e6; }
+    select:disabled { background:#f0f2f7; color:#8a8f9c; }
+    .row { display:flex; gap:10px; align-items:center; margin:10px 0; }
+    .row input { transform: translateY(1px); }
+    button { background:#2b6cf6; color:#fff; border:none; cursor:pointer; font-weight:700; }
+    button:disabled { background:#9db6f7; cursor:not-allowed; }
+    .status { margin-top:12px; font-size:13px; }
+    .logs { margin-top:10px; background:#0b1020; color:#d9e0ff; padding:10px; border-radius:6px; height:140px; overflow:auto; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size:12px; }
+    .files { margin-top:10px; }
+    .files a { display:block; margin:6px 0; }
+    .hint { color:#667; font-size:12px; margin-top:8px; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <label for="municipality">Select municipality</label>
+    <select id="municipality">
+      <option value="">Select</option>
+    </select>
+
+    <div class="row">
+      <input type="checkbox" id="allParcels" />
+      <label for="allParcels" style="margin:0; font-weight:600;">All parcels</label>
+    </div>
+
+    <label for="refcat">Select cadastral reference</label>
+    <select id="refcat" disabled>
+      <option value="">Select</option>
+    </select>
+
+    <div style="margin-top:14px;">
+      <button id="generateBtn" disabled>Generate IFC</button>
+    </div>
+
+    <div class="status" id="status"></div>
+    <div class="logs" id="logs" style="display:none;"></div>
+    <div class="files" id="files"></div>
+    <div class="hint">Backend must be running on <b>http://127.0.0.1:8000</b></div>
+  </div>
+
+<script>
+const API_BASE = "http://127.0.0.1:8000";
+
+const municipalitySel = document.getElementById("municipality");
+const allParcelsCb = document.getElementById("allParcels");
+const refcatSel = document.getElementById("refcat");
+const generateBtn = document.getElementById("generateBtn");
+const statusEl = document.getElementById("status");
+const logsEl = document.getElementById("logs");
+const filesEl = document.getElementById("files");
+
+let currentJobId = null;
+let pollTimer = null;
+
+function setStatus(text) {
+  statusEl.textContent = text || "";
+}
+
+function setLogs(lines) {
+  if (!lines || lines.length === 0) {
+    logsEl.style.display = "none";
+    logsEl.textContent = "";
+    return;
+  }
+  logsEl.style.display = "block";
+  logsEl.textContent = lines.join("\n");
+  logsEl.scrollTop = logsEl.scrollHeight;
+}
+
+function setFiles(files) {
+  filesEl.innerHTML = "";
+  if (!files || files.length === 0) return;
+
+  const title = document.createElement("div");
+  title.style.fontWeight = "700";
+  title.style.marginTop = "8px";
+  title.textContent = "Outputs:";
+  filesEl.appendChild(title);
+
+  files.forEach(f => {
+    const a = document.createElement("a");
+    a.href = API_BASE + f.download_url;
+    a.textContent = f.file + "  (" + f.path + ")";
+    a.target = "_blank";
+    filesEl.appendChild(a);
+  });
+}
+
+function resetOutputs() {
+  setStatus("");
+  setLogs([]);
+  setFiles([]);
+}
+
+function updateRefcatEnabledState() {
+  const muniSelected = municipalitySel.value !== "";
+  const allSelected = allParcelsCb.checked;
+
+  // Municipality seçilmeden: refcat disabled + boş, button disabled
+  if (!muniSelected) {
+    refcatSel.disabled = true;
+    refcatSel.innerHTML = `<option value="">Select</option>`;
+    generateBtn.disabled = true;
+    return;
+  }
+
+  // Municipality seçili:
+  if (allSelected) {
+    // All parcels seçiliyse refcat disabled (seçim zorunlu değil)
+    refcatSel.disabled = true;
+    generateBtn.disabled = false; // all parcels ile generate edilebilir
+  } else {
+    // all parcels değilse refcat aktif; refcat seçilene kadar button disable
+    refcatSel.disabled = false;
+    generateBtn.disabled = (refcatSel.value === "");
+  }
+}
+
+async function loadMunicipalities() {
+  const res = await fetch(API_BASE + "/municipalities");
+  if (!res.ok) throw new Error("Failed to load municipalities");
+  const list = await res.json();
+
+  list.forEach(m => {
+    const opt = document.createElement("option");
+    opt.value = m;
+    opt.textContent = m;
+    municipalitySel.appendChild(opt);
+  });
+}
+
+async function loadParcelsForMunicipality(muni) {
+  refcatSel.innerHTML = `<option value="">Select</option>`;
+  const res = await fetch(API_BASE + "/parcels?municipality=" + encodeURIComponent(muni));
+  if (!res.ok) throw new Error("Failed to load parcels");
+  const list = await res.json();
+
+  list.forEach(rc => {
+    const opt = document.createElement("option");
+    opt.value = rc;
+    opt.textContent = rc;
+    refcatSel.appendChild(opt);
+  });
+}
+
+function startPolling(jobId) {
+  if (pollTimer) clearInterval(pollTimer);
+
+  pollTimer = setInterval(async () => {
+    const res = await fetch(API_BASE + "/jobs/" + jobId);
+    if (!res.ok) return;
+    const data = await res.json();
+
+    const pct = Math.round((data.progress || 0) * 100);
+    setStatus(`Status: ${data.status} | ${pct}% | ${data.message || ""}`);
+    setLogs(data.logs || []);
+
+    if (data.status === "success") {
+      setFiles(data.files || []);
+      stopPolling();
+      generateBtn.disabled = false;
+    } else if (data.status === "error") {
+      stopPolling();
+      generateBtn.disabled = false;
+    }
+  }, 800);
+}
+
+function stopPolling() {
+  if (pollTimer) clearInterval(pollTimer);
+  pollTimer = null;
+}
+
+async function generate() {
+  resetOutputs();
+  generateBtn.disabled = true;
+  generateBtn.textContent = "Generating...";
+
+  const payload = {
+    municipality: municipalitySel.value,
+    all_parcels: allParcelsCb.checked,
+    refcat: refcatSel.value || null
+  };
+
+  try {
+    const res = await fetch(API_BASE + "/generate", {
+      method: "POST",
+      headers: { "Content-Type":"application/json" },
+      body: JSON.stringify(payload)
+    });
+
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || "Generate failed");
+    }
+
+    const data = await res.json();
+    currentJobId = data.job_id;
+    setStatus("Job created: " + currentJobId);
+    startPolling(currentJobId);
+
+  } catch (e) {
+    setStatus("ERROR: " + e.message);
+    generateBtn.disabled = false;
+  } finally {
+    generateBtn.textContent = "Generate IFC";
+    updateRefcatEnabledState(); // buton state’ini kurallara göre tekrar ayarla
+  }
+}
+
+municipalitySel.addEventListener("change", async () => {
+  resetOutputs();
+
+  // municipality seçilince: all parcels değilse refcat listesi yükle
+  updateRefcatEnabledState();
+  if (municipalitySel.value) {
+    try {
+      await loadParcelsForMunicipality(municipalitySel.value);
+    } catch (e) {
+      setStatus("ERROR: " + e.message);
+    }
+  }
+  updateRefcatEnabledState();
+});
+
+allParcelsCb.addEventListener("change", () => {
+  resetOutputs();
+  updateRefcatEnabledState();
+});
+
+refcatSel.addEventListener("change", () => {
+  resetOutputs();
+  updateRefcatEnabledState();
+});
+
+generateBtn.addEventListener("click", generate);
+
+// init
+(async function init(){
+  try {
+    await loadMunicipalities();
+    updateRefcatEnabledState();
+  } catch (e) {
+    setStatus("ERROR: " + e.message);
+  }
+})();
+</script>
+</body>
+</html>

@@ -2,23 +2,27 @@
 """
 IFC Envelope Exporter (IFC4X3)
 
-Goal:
-- Given a 2D footprint polygon (XY points in meters) and zoning constraints,
-  create an IFC "envelope volume" for visualization / checking.
+Amaç
+-----
+2D footprint poligonundan (XY, metre) ve zoning kısıtlarından,
+IFC içinde görselleştirilebilir bir "envelope volume" üretmek.
 
-Supported geometry modes:
-1) Simple extrude up to ALTMAX (if no roof slope rule is used)
-2) Clip-based gable roof envelope:
-   - ALTMAX is interpreted as "eaves height" (height at the boundary)
-   - roof is allowed to go ABOVE ALTMAX, but NOT exceed the max roof slope
-   - implemented using boolean clipping (IfcHalfSpaceSolid + IfcBooleanClippingResult)
+Geometri Modları
+----------------
+1) Roof kuralı yoksa:
+   - footprint'i 'height' kadar +Z yönünde extrude eder (basit prizma)
 
-Important detail:
-- Many cadastral points are in large coordinate systems (UTM etc.)
-  Large coordinates can cause floating point precision issues in IFC viewers.
-  We solve this by:
-    a) translating the footprint to local coordinates (small numbers)
-    b) setting ObjectPlacement of the IFC element back to the original offset
+2) Roof kuralı varsa (hip roof clipping):
+   - 'height' = ALTMAX = saçak kotu (eaves height)
+   - Çatı, bu kotun ÜSTÜNDE başlar (hs_above + eps ile garanti)
+   - Roof slope (deg) ile sınırlandırılmış 4 eğimli düzlemle (hip) clip edilir
+   - Son envelope = (walls up to eaves) UNION (roof-only above eaves)
+
+Numerik Stabilite
+-----------------
+Kadastral koordinatlar (UTM vb.) çok büyük olabilir. Viewer'larda precision sorunları çıkmasın diye:
+- footprint'i local'e taşırız (minX/minY -> 0,0)
+- IFC element'in ObjectPlacement'ına world offset'i geri koyarız
 """
 
 import math
@@ -31,62 +35,52 @@ Point2 = Tuple[float, float]
 
 
 # =============================================================================
-# Small geometry helpers
+# Geometry helpers (2D)
 # =============================================================================
 
 def _ensure_ring_open(points: List[Point2]) -> List[Point2]:
-    """If the polygon ring is closed (first==last), return an open ring."""
+    """If polygon ring is closed (first == last), return an open ring."""
     if len(points) >= 2 and points[0] == points[-1]:
         return points[:-1]
     return points
 
 
-def _bbox(points: List[Point2]) -> Tuple[float, float, float, float]:
-    """Axis-aligned bounding box of 2D points."""
-    xs = [p[0] for p in points]
-    ys = [p[1] for p in points]
-    return min(xs), min(ys), max(xs), max(ys)
-
-
 def _to_local_xy(points: List[Point2]) -> Tuple[List[Point2], Tuple[float, float]]:
     """
-    Translate points so that minX/minY becomes (0,0).
-    Returns: (local_points, (offset_x, offset_y))
+    Translate footprint so that minX/minY becomes (0,0) for numeric stability.
+
+    Returns
+    -------
+    local_points : List[(x,y)]
+    offset       : (ox, oy)  -> original minX/minY (world offset)
     """
     pts = _ensure_ring_open(points)
-    minx, miny, _, _ = _bbox(pts)
+    xs = [p[0] for p in pts]
+    ys = [p[1] for p in pts]
+    minx, miny = min(xs), min(ys)
     local = [(x - minx, y - miny) for (x, y) in pts]
     return local, (minx, miny)
 
 
-def _pick_ridge_dir(points: List[Point2]) -> str:
-    """
-    Decide ridge direction for a gable roof:
-    - If footprint bbox is longer in X -> ridge along X
-    - else ridge along Y
-    This is a heuristic. Later we can replace it with "longest edge" or PCA.
-    """
-    minx, miny, maxx, maxy = _bbox(points)
-    dx = maxx - minx
-    dy = maxy - miny
-    return "x" if dx >= dy else "y"
-
-def _unit(vx, vy):
-    l = math.hypot(vx, vy)
-    if l < 1e-9:
+def _unit(vx: float, vy: float) -> Tuple[float, float]:
+    """Return unit vector of (vx,vy)."""
+    L = math.hypot(vx, vy)
+    if L < 1e-9:
         return (1.0, 0.0)
-    return (vx / l, vy / l)
+    return (vx / L, vy / L)
+
 
 def _pick_ridge_dir_longest_edge(pts: List[Point2]) -> Tuple[float, float]:
     """
-    Returns a 2D unit vector (rx, ry) indicating ridge direction,
-    based on the longest polygon edge.
+    Pick ridge direction using the longest polygon edge.
+    Returns a unit vector (rx, ry).
     """
     pts = _ensure_ring_open(pts)
+
     best_len = -1.0
     best = (1.0, 0.0)
-
     n = len(pts)
+
     for i in range(n):
         x1, y1 = pts[i]
         x2, y2 = pts[(i + 1) % n]
@@ -96,12 +90,29 @@ def _pick_ridge_dir_longest_edge(pts: List[Point2]) -> Tuple[float, float]:
             best_len = L
             best = _unit(vx, vy)
 
-    return best  # ridge direction
+    return best
 
+
+def _support_point(pts: List[Point2], ux: float, uy: float, take_max: bool) -> Point2:
+    """
+    Get an extreme vertex in direction u=(ux,uy).
+    - take_max=True  -> argmax dot(u, p)
+    - take_max=False -> argmin dot(u, p)
+    """
+    best_p = pts[0]
+    best_v = best_p[0] * ux + best_p[1] * uy
+
+    for (x, y) in pts[1:]:
+        v = x * ux + y * uy
+        if (take_max and v > best_v) or ((not take_max) and v < best_v):
+            best_v = v
+            best_p = (x, y)
+
+    return best_p
 
 
 # =============================================================================
-# IFC low-level helpers (units, context, placements)
+# IFC low-level helpers (project/context/placement)
 # =============================================================================
 
 def _new_guid() -> str:
@@ -110,21 +121,12 @@ def _new_guid() -> str:
 
 def _make_project_context(model: ifcopenshell.file):
     """
-    Create IFC Project + Units + Geometric Representation Context.
-    Returns: (project, context, z_dir, x_dir)
+    Create IfcProject + Units (metre) + GeometricRepresentationContext.
+    Returns (project, context, z_dir, x_dir).
     """
-    project = model.create_entity(
-        "IfcProject",
-        GlobalId=_new_guid(),
-        Name="Envelope Project"
-    )
+    project = model.create_entity("IfcProject", GlobalId=_new_guid(), Name="Envelope Project")
 
-    length_unit = model.create_entity(
-        "IfcSIUnit",
-        UnitType="LENGTHUNIT",
-        Name="METRE",
-        Prefix=None
-    )
+    length_unit = model.create_entity("IfcSIUnit", UnitType="LENGTHUNIT", Name="METRE", Prefix=None)
     project.UnitsInContext = model.create_entity("IfcUnitAssignment", Units=[length_unit])
 
     origin = model.create_entity("IfcCartesianPoint", Coordinates=(0.0, 0.0, 0.0))
@@ -141,8 +143,8 @@ def _make_project_context(model: ifcopenshell.file):
             "IfcAxis2Placement3D",
             Location=origin,
             Axis=z_dir,
-            RefDirection=x_dir
-        )
+            RefDirection=x_dir,
+        ),
     )
     project.RepresentationContexts = [context]
     return project, context, z_dir, x_dir
@@ -150,29 +152,22 @@ def _make_project_context(model: ifcopenshell.file):
 
 def _make_spatial_structure(model: ifcopenshell.file, project, zone_key: str):
     """
-    Create: Site -> Building -> Storey and aggregate them under the project.
-    Returns: storey (where we'll contain our envelope proxy)
+    Create: Site -> Building -> Storey and aggregate under project.
+    Returns storey (container for the proxy element).
     """
-    site = model.create_entity(
-        "IfcSite",
-        GlobalId=_new_guid(),
-        Name="Site",
-        CompositionType="ELEMENT"
-    )
-
+    site = model.create_entity("IfcSite", GlobalId=_new_guid(), Name="Site", CompositionType="ELEMENT")
     building = model.create_entity(
         "IfcBuilding",
         GlobalId=_new_guid(),
         Name=f"Building Zone {zone_key}",
-        CompositionType="ELEMENT"
+        CompositionType="ELEMENT",
     )
-
     storey = model.create_entity(
         "IfcBuildingStorey",
         GlobalId=_new_guid(),
         Name="Ground Floor",
         Elevation=0.0,
-        CompositionType="ELEMENT"
+        CompositionType="ELEMENT",
     )
 
     model.create_entity("IfcRelAggregates", GlobalId=_new_guid(), RelatingObject=project, RelatedObjects=[site])
@@ -184,8 +179,7 @@ def _make_spatial_structure(model: ifcopenshell.file, project, zone_key: str):
 
 def _place_proxy_at_offset(model: ifcopenshell.file, proxy, ox: float, oy: float, z_dir, x_dir):
     """
-    Place the proxy at world coordinate (ox, oy, 0), while its geometry is defined locally (0..N).
-    This avoids large-number precision issues.
+    Place proxy at world offset (ox,oy,0). Geometry itself is local (small coords).
     """
     proxy.ObjectPlacement = model.create_entity(
         "IfcLocalPlacement",
@@ -194,42 +188,46 @@ def _place_proxy_at_offset(model: ifcopenshell.file, proxy, ox: float, oy: float
             "IfcAxis2Placement3D",
             Location=model.create_entity("IfcCartesianPoint", Coordinates=(float(ox), float(oy), 0.0)),
             Axis=z_dir,
-            RefDirection=x_dir
-        )
+            RefDirection=x_dir,
+        ),
     )
 
 
 def _attach_proxy_to_storey(model: ifcopenshell.file, storey, proxy):
+    """Contain proxy in storey."""
     model.create_entity(
         "IfcRelContainedInSpatialStructure",
         GlobalId=_new_guid(),
         RelatingStructure=storey,
-        RelatedElements=[proxy]
+        RelatedElements=[proxy],
     )
 
 
 def _add_pset_roof_slopes(model, element, real_deg: Optional[float], virtual_deg: Optional[float]):
     """
-    Store the slope constraints as custom properties on the proxy.
-    This is useful for debugging / inspection later.
+    Store roof slope constraints as custom properties (debug/inspection).
     """
     props = []
 
     if real_deg is not None:
-        props.append(model.create_entity(
-            "IfcPropertySingleValue",
-            Name="MaxRoofSlopeRealDeg",
-            NominalValue=model.create_entity("IfcReal", float(real_deg)),
-            Unit=None
-        ))
+        props.append(
+            model.create_entity(
+                "IfcPropertySingleValue",
+                Name="MaxRoofSlopeRealDeg",
+                NominalValue=model.create_entity("IfcReal", float(real_deg)),
+                Unit=None,
+            )
+        )
 
     if virtual_deg is not None:
-        props.append(model.create_entity(
-            "IfcPropertySingleValue",
-            Name="MaxRoofSlopeVirtualDeg",
-            NominalValue=model.create_entity("IfcReal", float(virtual_deg)),
-            Unit=None
-        ))
+        props.append(
+            model.create_entity(
+                "IfcPropertySingleValue",
+                Name="MaxRoofSlopeVirtualDeg",
+                NominalValue=model.create_entity("IfcReal", float(virtual_deg)),
+                Unit=None,
+            )
+        )
 
     if not props:
         return
@@ -238,14 +236,14 @@ def _add_pset_roof_slopes(model, element, real_deg: Optional[float], virtual_deg
         "IfcPropertySet",
         GlobalId=_new_guid(),
         Name="Pset_ZoningRoofConstraints",
-        HasProperties=props
+        HasProperties=props,
     )
 
     model.create_entity(
         "IfcRelDefinesByProperties",
         GlobalId=_new_guid(),
         RelatedObjects=[element],
-        RelatingPropertyDefinition=pset
+        RelatingPropertyDefinition=pset,
     )
 
 
@@ -255,7 +253,7 @@ def _add_pset_roof_slopes(model, element, real_deg: Optional[float], virtual_deg
 
 def _make_closed_profile(model: ifcopenshell.file, pts2: List[Point2]):
     """
-    Make IfcArbitraryClosedProfileDef from an open ring (pts2).
+    Build IfcArbitraryClosedProfileDef from an open ring (pts2).
     """
     pts2 = _ensure_ring_open(pts2)
 
@@ -264,34 +262,25 @@ def _make_closed_profile(model: ifcopenshell.file, pts2: List[Point2]):
         for (x, y) in pts2
     ]
 
-    # Close polyline explicitly
-    first = pts2[0]
-    last = pts2[-1]
-    if first != last:
-        cartesian_points.append(
-            model.create_entity("IfcCartesianPoint", Coordinates=(float(first[0]), float(first[1]), 0.0))
-        )
+    # Ensure closure (repeat first point)
+    x0, y0 = pts2[0]
+    cartesian_points.append(model.create_entity("IfcCartesianPoint", Coordinates=(float(x0), float(y0), 0.0)))
 
     polyline = model.create_entity("IfcPolyline", Points=cartesian_points)
 
-    return model.create_entity(
-        "IfcArbitraryClosedProfileDef",
-        ProfileType="AREA",
-        OuterCurve=polyline
-    )
+    return model.create_entity("IfcArbitraryClosedProfileDef", ProfileType="AREA", OuterCurve=polyline)
 
 
 def _make_extruded_solid(model: ifcopenshell.file, profile, depth: float):
     """
-    Create a simple IfcExtrudedAreaSolid along +Z.
+    Create IfcExtrudedAreaSolid along +Z.
     """
     extrusion_direction = model.create_entity("IfcDirection", DirectionRatios=(0.0, 0.0, 1.0))
-
     axis_placement = model.create_entity(
         "IfcAxis2Placement3D",
         Location=model.create_entity("IfcCartesianPoint", Coordinates=(0.0, 0.0, 0.0)),
         Axis=model.create_entity("IfcDirection", DirectionRatios=(0.0, 0.0, 1.0)),
-        RefDirection=model.create_entity("IfcDirection", DirectionRatios=(1.0, 0.0, 0.0))
+        RefDirection=model.create_entity("IfcDirection", DirectionRatios=(1.0, 0.0, 0.0)),
     )
 
     return model.create_entity(
@@ -299,19 +288,14 @@ def _make_extruded_solid(model: ifcopenshell.file, profile, depth: float):
         SweptArea=profile,
         Position=axis_placement,
         ExtrudedDirection=extrusion_direction,
-        Depth=float(depth)
+        Depth=float(depth),
     )
 
 
-# =============================================================================
-# Clip-based gable roof (Halfspaces + BooleanClippingResult)
-# =============================================================================
-
 def _make_ifc_plane(model, origin_xyz, normal_xyz):
     """
-    Create an IfcPlane with a given origin point and normal direction.
-    In IFC, IfcPlane is defined by an IfcAxis2Placement3D.
-    The 'Axis' direction is the plane normal.
+    Create an IfcPlane defined by Axis2Placement3D.
+    Axis direction = plane normal.
     """
     ox, oy, oz = origin_xyz
     nx, ny, nz = normal_xyz
@@ -322,86 +306,108 @@ def _make_ifc_plane(model, origin_xyz, normal_xyz):
             "IfcAxis2Placement3D",
             Location=model.create_entity("IfcCartesianPoint", Coordinates=(float(ox), float(oy), float(oz))),
             Axis=model.create_entity("IfcDirection", DirectionRatios=(float(nx), float(ny), float(nz))),
-            # RefDirection can be any non-parallel direction; (1,0,0) is OK in our local coords
             RefDirection=model.create_entity("IfcDirection", DirectionRatios=(1.0, 0.0, 0.0)),
-        )
+        ),
     )
 
 
 def _make_halfspace(model, plane, keep_side: str):
     """
-    IfcHalfSpaceSolid keeps one side of a plane.
-    AgreementFlag interpretation can be confusing and viewer-dependent.
-    We keep a simple switch here so you can flip if needed.
+    Create IfcHalfSpaceSolid.
+    AgreementFlag viewer'lara göre hassas olabiliyor.
 
     keep_side:
-      - "below": we want to keep the volume under the roof plane (typical envelope)
-      - "above": keep volume above the plane
+      - "below": roof plane'in altında kalan hacmi tut (envelope mantığı)
+      - "above": roof plane'in üstünü tut
     """
-    if keep_side == "below":
-        agreement = True
-    else:
-        agreement = False
+    agreement = True if keep_side == "below" else False
     return model.create_entity("IfcHalfSpaceSolid", BaseSurface=plane, AgreementFlag=agreement)
 
 
-def _gable_roof_halfspaces(model, pts2: List[Point2], h_eaves: float, slope_deg: float):
-    minx, miny, maxx, maxy = _bbox(pts2)
-    cx = (minx + maxx) / 2.0
-    cy = (miny + maxy) / 2.0
-
-    t = math.tan(math.radians(slope_deg))
-
-    # Ridge direction from real geometry
-    rx, ry = _pick_ridge_dir_longest_edge(pts2)
-
-    # Slope direction is perpendicular to ridge
-    sx, sy = (-ry, rx)
-
-    # Half-span: project bbox corners to slope axis
-    # (cheap approximation, good enough)
-    corners = [(minx, miny), (minx, maxy), (maxx, miny), (maxx, maxy)]
-    projs = [ (x - cx)*sx + (y - cy)*sy for (x,y) in corners ]
-    half_span = max(abs(p) for p in projs)
-    rise_max = half_span * t
-
-    # Plane 1 passes through centerline at +half_span
-    # Plane 2 passes through centerline at -half_span
-    # We anchor them at eaves height on those extremes:
-    p1x = cx + sx * half_span
-    p1y = cy + sy * half_span
-    p2x = cx - sx * half_span
-    p2y = cy - sy * half_span
-
-    # Normals (pointing "up-ish" with slope)
-    n1 = ( t*sx,  t*sy, 1.0)
-    n2 = (-t*sx, -t*sy, 1.0)
-
-    plane1 = _make_ifc_plane(model, origin_xyz=(p1x, p1y, h_eaves), normal_xyz=n1)
-    plane2 = _make_ifc_plane(model, origin_xyz=(p2x, p2y, h_eaves), normal_xyz=n2)
-
-    hs1 = _make_halfspace(model, plane1, keep_side="below")
-    hs2 = _make_halfspace(model, plane2, keep_side="below")
-
-    return [hs1, hs2], rise_max
-
-
-
-def _apply_boolean_clipping(model, base_solid, halfspaces):
+def _horizontal_halfspace(model, z: float, keep: str):
     """
-    Apply successive clipping operations.
-    We use DIFFERENCE(base, halfspace) to cut away the "forbidden" side.
-    If you see inverted results in the viewer, it's usually because the halfspace side is flipped.
+    Horizontal plane at height z. Used to force roof to start ABOVE eaves.
+    keep="above" -> keep z >= threshold (viewer uyumu için AgreementFlag ters seçilebilir)
     """
-    clipped = base_solid
+    plane = _make_ifc_plane(model, origin_xyz=(0.0, 0.0, z), normal_xyz=(0.0, 0.0, 1.0))
+    agreement = False if keep == "above" else True
+    return model.create_entity("IfcHalfSpaceSolid", BaseSurface=plane, AgreementFlag=agreement)
+
+
+def _bool(model, op: str, a, b):
+    """Create an IfcBooleanResult."""
+    return model.create_entity("IfcBooleanResult", Operator=op, FirstOperand=a, SecondOperand=b)
+
+
+def _clip_intersections(model, base, halfspaces):
+    """
+    Successive INTERSECTION clipping (BooleanClippingResult chain).
+    """
+    clipped = base
     for hs in halfspaces:
         clipped = model.create_entity(
             "IfcBooleanClippingResult",
             Operator="INTERSECTION",
             FirstOperand=clipped,
-            SecondOperand=hs
+            SecondOperand=hs,
         )
     return clipped
+
+
+# =============================================================================
+# Roof logic (HIP roof)
+# =============================================================================
+
+def _hip_roof_halfspaces(model, pts2: List[Point2], h_eaves: float, slope_deg: float):
+    """
+    Build 4 roof planes for a hip roof:
+    - 2 planes along ridge-perpendicular axis (S)
+    - 2 planes along ridge axis (R)
+    Planes are anchored at actual polygon support points (not bbox).
+    """
+    pts2 = _ensure_ring_open(pts2)
+    t = math.tan(math.radians(slope_deg))
+
+    # Ridge direction from real footprint
+    rx, ry = _pick_ridge_dir_longest_edge(pts2)
+    # Perpendicular
+    sx, sy = (-ry, rx)
+
+    # Compute spans using projections (true footprint, not bbox)
+    proj_r = [x * rx + y * ry for (x, y) in pts2]
+    proj_s = [x * sx + y * sy for (x, y) in pts2]
+    span_r = max(proj_r) - min(proj_r)
+    span_s = max(proj_s) - min(proj_s)
+
+    half_r = 0.5 * span_r
+    half_s = 0.5 * span_s
+
+    # Max rise (for roof_base height)
+    rise_max = max(half_r, half_s) * t
+
+    planes = []
+
+    # +S side
+    p = _support_point(pts2, sx, sy, take_max=True)
+    n = (t * sx, t * sy, 1.0)
+    planes.append(_make_halfspace(model, _make_ifc_plane(model, (p[0], p[1], h_eaves), n), "below"))
+
+    # -S side
+    p = _support_point(pts2, sx, sy, take_max=False)
+    n = (-t * sx, -t * sy, 1.0)
+    planes.append(_make_halfspace(model, _make_ifc_plane(model, (p[0], p[1], h_eaves), n), "below"))
+
+    # +R side
+    p = _support_point(pts2, rx, ry, take_max=True)
+    n = (t * rx, t * ry, 1.0)
+    planes.append(_make_halfspace(model, _make_ifc_plane(model, (p[0], p[1], h_eaves), n), "below"))
+
+    # -R side
+    p = _support_point(pts2, rx, ry, take_max=False)
+    n = (-t * rx, -t * ry, 1.0)
+    planes.append(_make_halfspace(model, _make_ifc_plane(model, (p[0], p[1], h_eaves), n), "below"))
+
+    return planes, rise_max
 
 
 # =============================================================================
@@ -414,88 +420,102 @@ def create_ifc_envelope(
     zone_key: str,
     out_path: str,
     roof_slope_deg_real: Optional[float] = None,
-    roof_slope_deg_virtual: Optional[float] = None
+    roof_slope_deg_virtual: Optional[float] = None,
 ):
     """
-    Create one IFC file representing the parcel envelope.
+    Create one IFC representing the parcel envelope.
 
     Parameters
     ----------
     footprint_points:
         Polygon footprint XY points in meters (can be global coords).
     height:
-        Interpreted as:
-          - If roof slope is None: max height of the volume
-          - If roof slope is given: "eaves height" (ALTMAX at boundary)
+        If roof_slope_deg_real is None -> max height of prism.
+        Else -> eaves height (ALTMAX at boundary).
     roof_slope_deg_real:
-        If provided -> use clip-based gable roof envelope.
-        If None -> simple extrude.
+        If provided -> hip-roof clipping envelope.
+        If None -> simple extrusion.
     roof_slope_deg_virtual:
-        Currently stored as metadata only (pset). (You can later use it for a second envelope layer.)
+        Stored only as metadata for now.
     """
     model = ifcopenshell.file(schema="IFC4X3")
 
-    # 1) Project/context setup
+    # Project + context
     project, context, z_dir, x_dir = _make_project_context(model)
     storey = _make_spatial_structure(model, project, zone_key)
 
-    # 2) Create envelope proxy element
+    # Envelope element (proxy)
     proxy = model.create_entity(
         "IfcBuildingElementProxy",
         GlobalId=_new_guid(),
         Name=f"Envelope_{zone_key}",
-        ObjectType="BUILDING_ENVELOPE"
+        ObjectType="BUILDING_ENVELOPE",
     )
 
-    # 3) Localize footprint for numerical stability + place back into world coords
+    # Localize footprint and place proxy back at world offset
     pts2_local, (ox, oy) = _to_local_xy(footprint_points)
     _place_proxy_at_offset(model, proxy, ox, oy, z_dir, x_dir)
 
-    # 4) Attach metadata (roof slopes)
+    # Attach constraints (optional metadata)
     _add_pset_roof_slopes(model, proxy, roof_slope_deg_real, roof_slope_deg_virtual)
 
-    # 5) Put proxy into spatial structure
+    # Contain in storey
     _attach_proxy_to_storey(model, storey, proxy)
 
-    # 6) Build a closed 2D profile (in LOCAL coords)
+    # 2D profile in local coords
     profile = _make_closed_profile(model, pts2_local)
 
-    # 7) Geometry path selection
+    # -------------------------------------------------------------------------
+    # Geometry build
+    # -------------------------------------------------------------------------
     if roof_slope_deg_real is None:
-        # --- Simple extrude up to 'height' ---
+        # Simple prism up to 'height'
         solid = _make_extruded_solid(model, profile, depth=float(height))
-
         shape_rep = model.create_entity(
             "IfcShapeRepresentation",
             ContextOfItems=context,
             RepresentationIdentifier="Body",
             RepresentationType="SweptSolid",
-            Items=[solid]
+            Items=[solid],
         )
+
     else:
-        # --- Clip-based roof envelope ---
-        h_eaves = float(height)  # ALTMAX as eaves height
-        halfspaces, rise_max = _gable_roof_halfspaces(model, pts2_local, h_eaves, float(roof_slope_deg_real))
+        # Walls up to eaves (ALTMAX)
+        h_eaves = float(height)
+        walls_solid = _make_extruded_solid(model, profile, depth=h_eaves)
 
-        # We extrude higher than eaves so that the roof can rise above ALTMAX
-        big_height = h_eaves + rise_max + 1.0  # +1m safety
-        base_solid = _make_extruded_solid(model, profile, depth=float(big_height))
+        # Build a tall roof base, clip by hip planes
+        halfspaces_roof, rise_max = _hip_roof_halfspaces(model, pts2_local, h_eaves, float(roof_slope_deg_real))
+        big_height = h_eaves + rise_max + 1.0
+        roof_base = _make_extruded_solid(model, profile, depth=big_height)
 
-        clipped = _apply_boolean_clipping(model, base_solid, halfspaces)
+        # Roof wedge (hip planes intersection)
+        roof_wedge = _clip_intersections(model, roof_base, halfspaces_roof)
+
+        # Force roof to start ABOVE eaves (avoid coplanar overlap / z-fighting)
+        eps = 0.001  # 1mm
+        hs_above = _horizontal_halfspace(model, h_eaves + eps, keep="above")
+        roof_wedge = _clip_intersections(model, roof_wedge, [hs_above])
+
+        # Keep only roof part above eaves (subtract walls volume)
+        roof_only = _bool(model, "DIFFERENCE", roof_wedge, walls_solid)
+
+        # Final envelope
+        envelope_solid = _bool(model, "UNION", walls_solid, roof_only)
 
         shape_rep = model.create_entity(
             "IfcShapeRepresentation",
             ContextOfItems=context,
             RepresentationIdentifier="Body",
             RepresentationType="CSG",
-            Items=[clipped]
+            Items=[envelope_solid],
         )
 
-    # 8) Assign the shape to the proxy
+    # Assign shape
     proxy.Representation = model.create_entity(
         "IfcProductDefinitionShape",
-        Representations=[shape_rep]
+        Representations=[shape_rep],
     )
 
-    # 9) Write IFC
+    # Write IFC
     model.write(out_path)

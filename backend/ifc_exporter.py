@@ -71,6 +71,34 @@ def _pick_ridge_dir(points: List[Point2]) -> str:
     dy = maxy - miny
     return "x" if dx >= dy else "y"
 
+def _unit(vx, vy):
+    l = math.hypot(vx, vy)
+    if l < 1e-9:
+        return (1.0, 0.0)
+    return (vx / l, vy / l)
+
+def _pick_ridge_dir_longest_edge(pts: List[Point2]) -> Tuple[float, float]:
+    """
+    Returns a 2D unit vector (rx, ry) indicating ridge direction,
+    based on the longest polygon edge.
+    """
+    pts = _ensure_ring_open(pts)
+    best_len = -1.0
+    best = (1.0, 0.0)
+
+    n = len(pts)
+    for i in range(n):
+        x1, y1 = pts[i]
+        x2, y2 = pts[(i + 1) % n]
+        vx, vy = (x2 - x1), (y2 - y1)
+        L = math.hypot(vx, vy)
+        if L > best_len:
+            best_len = L
+            best = _unit(vx, vy)
+
+    return best  # ridge direction
+
+
 
 # =============================================================================
 # IFC low-level helpers (units, context, placements)
@@ -311,54 +339,52 @@ def _make_halfspace(model, plane, keep_side: str):
       - "above": keep volume above the plane
     """
     if keep_side == "below":
-        agreement = False
-    else:
         agreement = True
+    else:
+        agreement = False
     return model.create_entity("IfcHalfSpaceSolid", BaseSurface=plane, AgreementFlag=agreement)
 
 
 def _gable_roof_halfspaces(model, pts2: List[Point2], h_eaves: float, slope_deg: float):
-    """
-    Build two halfspaces that represent a gable roof limit.
-
-    Assumption:
-    - ALTMAX = eaves height (height at parcel boundary)
-    - roof may go ABOVE ALTMAX but must respect slope_deg
-
-    Returns:
-      (halfspaces, rise_max)
-        - halfspaces: [IfcHalfSpaceSolid, IfcHalfSpaceSolid]
-        - rise_max: maximum possible roof rise based on bbox span and slope
-    """
     minx, miny, maxx, maxy = _bbox(pts2)
+    cx = (minx + maxx) / 2.0
+    cy = (miny + maxy) / 2.0
+
     t = math.tan(math.radians(slope_deg))
-    ridge_dir = _pick_ridge_dir(pts2)
 
-    halfspaces = []
+    # Ridge direction from real geometry
+    rx, ry = _pick_ridge_dir_longest_edge(pts2)
 
-    if ridge_dir == "x":
-        # ridge along X, slope across Y
-        # plane through (y=miny, z=h_eaves) rising with slope towards center
-        plane1 = _make_ifc_plane(model, origin_xyz=(0.0, miny, h_eaves), normal_xyz=(0.0, -t, 1.0))
-        halfspaces.append(_make_halfspace(model, plane1, keep_side="below"))
+    # Slope direction is perpendicular to ridge
+    sx, sy = (-ry, rx)
 
-        # plane through (y=maxy, z=h_eaves) rising towards center from the other side
-        plane2 = _make_ifc_plane(model, origin_xyz=(0.0, maxy, h_eaves), normal_xyz=(0.0, t, 1.0))
-        halfspaces.append(_make_halfspace(model, plane2, keep_side="below"))
+    # Half-span: project bbox corners to slope axis
+    # (cheap approximation, good enough)
+    corners = [(minx, miny), (minx, maxy), (maxx, miny), (maxx, maxy)]
+    projs = [ (x - cx)*sx + (y - cy)*sy for (x,y) in corners ]
+    half_span = max(abs(p) for p in projs)
+    rise_max = half_span * t
 
-        rise_max = (maxy - miny) * 0.5 * t
+    # Plane 1 passes through centerline at +half_span
+    # Plane 2 passes through centerline at -half_span
+    # We anchor them at eaves height on those extremes:
+    p1x = cx + sx * half_span
+    p1y = cy + sy * half_span
+    p2x = cx - sx * half_span
+    p2y = cy - sy * half_span
 
-    else:
-        # ridge along Y, slope across X
-        plane1 = _make_ifc_plane(model, origin_xyz=(minx, 0.0, h_eaves), normal_xyz=(-t, 0.0, 1.0))
-        halfspaces.append(_make_halfspace(model, plane1, keep_side="below"))
+    # Normals (pointing "up-ish" with slope)
+    n1 = ( t*sx,  t*sy, 1.0)
+    n2 = (-t*sx, -t*sy, 1.0)
 
-        plane2 = _make_ifc_plane(model, origin_xyz=(maxx, 0.0, h_eaves), normal_xyz=(t, 0.0, 1.0))
-        halfspaces.append(_make_halfspace(model, plane2, keep_side="below"))
+    plane1 = _make_ifc_plane(model, origin_xyz=(p1x, p1y, h_eaves), normal_xyz=n1)
+    plane2 = _make_ifc_plane(model, origin_xyz=(p2x, p2y, h_eaves), normal_xyz=n2)
 
-        rise_max = (maxx - minx) * 0.5 * t
+    hs1 = _make_halfspace(model, plane1, keep_side="below")
+    hs2 = _make_halfspace(model, plane2, keep_side="below")
 
-    return halfspaces, rise_max
+    return [hs1, hs2], rise_max
+
 
 
 def _apply_boolean_clipping(model, base_solid, halfspaces):
@@ -371,7 +397,7 @@ def _apply_boolean_clipping(model, base_solid, halfspaces):
     for hs in halfspaces:
         clipped = model.create_entity(
             "IfcBooleanClippingResult",
-            Operator="DIFFERENCE",
+            Operator="INTERSECTION",
             FirstOperand=clipped,
             SecondOperand=hs
         )

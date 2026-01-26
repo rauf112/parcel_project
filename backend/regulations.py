@@ -13,6 +13,11 @@ class ZoneRule:
     key: str
     max_reg_height_m: float
     max_building_depth_m: Optional[float] = None
+
+    # NEW:
+    max_roof_slope_deg_real: Optional[float] = None
+    max_roof_slope_deg_virtual: Optional[float] = None
+
     notes: Optional[str] = None
 
 
@@ -30,9 +35,11 @@ ZONE_ALIASES: Dict[str, str] = {
 # -----------------------------
 DEFAULT_RULE = ZoneRule(
     key="__default__",
-    max_reg_height_m=10.0,      # senin istediğin gibi 10 kalsın
-    max_building_depth_m=None,  # None => main.py bbox depth kullanır
-    notes="Regla por defecto: zona sin normativa específica en regulations.py.",
+    max_reg_height_m=10.0,
+    max_building_depth_m=None,
+    max_roof_slope_deg_real=30.0,
+    max_roof_slope_deg_virtual=60.0,
+    notes="Default: roof slope real=30°, virtual=60°.",
 )
 
 

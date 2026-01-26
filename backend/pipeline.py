@@ -199,11 +199,16 @@ def generate_one(
     out_path = output_dir / out_name
 
     # 5) IFC export
+    real_slope_deg, virtual_slope_deg, roof_sources = _pick_roof_slopes(zone)
+    rule_sources.extend(roof_sources)
+
     create_ifc_envelope(
         footprint_points=xy,
         height=height_m,
         zone_key=zone,
         out_path=str(out_path),
+        roof_slope_deg_real=real_slope_deg,
+        roof_slope_deg_virtual=virtual_slope_deg,
     )
 
     # 6) normalize (olur da exporter alt klasöre yazarsa)
@@ -216,3 +221,23 @@ def generate_one(
         "rule_sources": rule_sources,
         "skipped": False,
     }
+
+def _pick_roof_slopes(zone: str) -> Tuple[float, float, list[str]]:
+    zc = regulations.canonical_zone(zone)
+    zr = regulations.ZONE_RULES.get(zc, regulations.DEFAULT_RULE)
+
+    sources = ["roof:REGULATIONS" if zc in regulations.ZONE_RULES else "roof:DEFAULT_RULE"]
+
+    real = zr.max_roof_slope_deg_real
+    virt = zr.max_roof_slope_deg_virtual
+
+    # eğer o zone rule’da slope boşsa default’a düş
+    if real is None:
+        real = regulations.DEFAULT_RULE.max_roof_slope_deg_real
+        sources.append("roof_real:FALLBACK_DEFAULT")
+
+    if virt is None:
+        virt = regulations.DEFAULT_RULE.max_roof_slope_deg_virtual
+        sources.append("roof_virtual:FALLBACK_DEFAULT")
+
+    return float(real), float(virt), sources

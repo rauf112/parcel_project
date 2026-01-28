@@ -34,6 +34,7 @@ import ifcopenshell.guid
 Point2 = Tuple[float, float]
 
 
+
 # =============================================================================
 # Geometry helpers (2D)
 # =============================================================================
@@ -338,6 +339,57 @@ def _bool(model, op: str, a, b):
     """Create an IfcBooleanResult."""
     return model.create_entity("IfcBooleanResult", Operator=op, FirstOperand=a, SecondOperand=b)
 
+def _assign_layer(model, items, layer_name: str):
+    """
+    AssignItems üzerinden layer atar.
+    Bu yöntem IfcBooleanResult / IfcBooleanClippingResult gibi item'larda da çalışır.
+    """
+    model.create_entity(
+        "IfcPresentationLayerAssignment",
+        Name=layer_name,
+        AssignedItems=list(items)  # <-- kritik: burada bağlanıyor
+    )
+
+def _style_item(model, item, rgb=(0.2, 0.6, 1.0), transparency=0.75, name="Style"):
+    """
+    IFC4X3 uyumlu stil bağlama:
+    IfcStyledItem -> Styles: [IfcSurfaceStyle]
+    """
+    r, g, b = rgb
+
+    colour = model.create_entity(
+        "IfcColourRgb",
+        Name=None,
+        Red=float(r),
+        Green=float(g),
+        Blue=float(b)
+    )
+
+    rendering = model.create_entity(
+        "IfcSurfaceStyleRendering",
+        SurfaceColour=colour,
+        Transparency=float(transparency),
+        ReflectanceMethod="NOTDEFINED"
+    )
+
+    surface_style = model.create_entity(
+        "IfcSurfaceStyle",
+        Name=name,
+        Side="BOTH",
+        Styles=[rendering]
+    )
+
+    model.create_entity(
+        "IfcStyledItem",
+        Item=item,
+        Styles=[surface_style],   # <-- kritik: doğrudan surface_style
+        Name=name
+    )
+
+
+
+
+
 
 def _clip_intersections(model, base, halfspaces):
     """
@@ -464,6 +516,7 @@ def create_ifc_envelope(
 
     # 2D profile in local coords
     profile = _make_closed_profile(model, pts2_local)
+    h_eaves = float(height)
 
     # -------------------------------------------------------------------------
     # Geometry build
@@ -481,7 +534,6 @@ def create_ifc_envelope(
 
     else:
         # Walls up to eaves (ALTMAX)
-        h_eaves = float(height)
         walls_solid = _make_extruded_solid(model, profile, depth=h_eaves)
 
         # Build a tall roof base, clip by hip planes
@@ -510,12 +562,70 @@ def create_ifc_envelope(
             RepresentationType="CSG",
             Items=[envelope_solid],
         )
+        # Layer'ı shape_rep yaratıldıktan sonra ata
+        _assign_layer(model, shape_rep.Items, "REAL_ENVELOPE")
+
 
     # Assign shape
     proxy.Representation = model.create_entity(
         "IfcProductDefinitionShape",
         Representations=[shape_rep],
     )
+    # -------------------------------------------------------------------------
+    # OPTIONAL: Virtual roof as a separate element/layer
+    # -------------------------------------------------------------------------
+    if roof_slope_deg_virtual is not None and roof_slope_deg_real is not None:
+        virtual_proxy = model.create_entity(
+            "IfcBuildingElementProxy",
+            GlobalId=_new_guid(),
+            Name=f"VirtualRoof_{zone_key}",
+            ObjectType="VIRTUAL_ROOF",
+        )
+
+        # Same placement offset (so it sits exactly on the footprint)
+        _place_proxy_at_offset(model, virtual_proxy, ox, oy, z_dir, x_dir)
+        _attach_proxy_to_storey(model, storey, virtual_proxy)
+
+        # Optional: also store both constraints on the virtual element
+        _add_pset_roof_slopes(model, virtual_proxy, roof_slope_deg_real, roof_slope_deg_virtual)
+
+        # Build virtual roof wedge with virtual slope
+        hs_virtual, rise_v = _hip_roof_halfspaces(model, pts2_local, h_eaves, float(roof_slope_deg_virtual))
+        big_h_v = h_eaves + rise_v + 1.0
+        roof_base_v = _make_extruded_solid(model, profile, depth=big_h_v)
+
+        roof_wedge_v = _clip_intersections(model, roof_base_v, hs_virtual)
+
+        # Start strictly above eaves (avoid overlap)
+        eps = 0.001
+        hs_above_v = _horizontal_halfspace(model, h_eaves + eps, keep="above")
+        roof_wedge_v = _clip_intersections(model, roof_wedge_v, [hs_above_v])
+
+        # Keep only roof (remove any part that coincides with walls)
+        walls_solid_v = _make_extruded_solid(model, profile, depth=h_eaves)
+        roof_only_v = _bool(model, "DIFFERENCE", roof_wedge_v, walls_solid_v)
+
+
+        virtual_shape_rep = model.create_entity(
+            "IfcShapeRepresentation",
+            ContextOfItems=context,
+            RepresentationIdentifier="Body",
+            RepresentationType="CSG",
+            Items=[roof_only_v],
+        )
+
+        # Put virtual roof on its own layer
+        _assign_layer(model, virtual_shape_rep.Items, "VIRTUAL_ROOF")
+
+        # ŞEFFAFLIK + RENK (Virtual roof)
+        for it in virtual_shape_rep.Items:
+            _style_item(model, it, rgb=(0.2, 0.6, 1.0), transparency=0.75, name="VirtualRoofStyle")
+
+        virtual_proxy.Representation = model.create_entity(
+            "IfcProductDefinitionShape",
+            Representations=[virtual_shape_rep],
+        )
+
 
     # Write IFC
     model.write(out_path)

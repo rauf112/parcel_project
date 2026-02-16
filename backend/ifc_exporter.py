@@ -2,27 +2,27 @@
 """
 IFC Envelope Exporter (IFC4X3)
 
-Amaç
------
-2D footprint poligonundan (XY, metre) ve zoning kısıtlarından,
-IFC içinde görselleştirilebilir bir "envelope volume" üretmek.
+Purpose
+-------
+Builds a visualizable envelope volume in IFC from a 2D footprint polygon
+(XY in meters) and zoning constraints (height, depth, roof slopes).
 
-Geometri Modları
-----------------
-1) Roof kuralı yoksa:
-   - footprint'i 'height' kadar +Z yönünde extrude eder (basit prizma)
+Geometry modes
+--------------
+1) No roof rule:
+    - Extrudes the footprint upward by `height` along +Z (simple prism).
 
-2) Roof kuralı varsa (hip roof clipping):
-   - 'height' = ALTMAX = saçak kotu (eaves height)
-   - Çatı, bu kotun ÜSTÜNDE başlar (hs_above + eps ile garanti)
-   - Roof slope (deg) ile sınırlandırılmış 4 eğimli düzlemle (hip) clip edilir
-   - Son envelope = (walls up to eaves) UNION (roof-only above eaves)
+2) Roof rule present (hip-roof clipping):
+    - `height` is interpreted as eaves height (ALTMAX).
+    - The roof starts strictly ABOVE the eaves (hs_above + eps to avoid overlap).
+    - Four sloped planes (hip roof) clip a tall roof base.
+    - Final envelope = (walls up to eaves) UNION (roof-only above eaves).
 
-Numerik Stabilite
------------------
-Kadastral koordinatlar (UTM vb.) çok büyük olabilir. Viewer'larda precision sorunları çıkmasın diye:
-- footprint'i local'e taşırız (minX/minY -> 0,0)
-- IFC element'in ObjectPlacement'ına world offset'i geri koyarız
+Numerical stability
+-------------------
+Cadastral coordinates (UTM) can be very large. To reduce precision issues in IFC viewers:
+- The footprint is localized (minX/minY -> 0,0) for geometry creation.
+- The world offset is restored via the IFC ObjectPlacement.
 """
 
 import math
@@ -92,6 +92,215 @@ def _pick_ridge_dir_longest_edge(pts: List[Point2]) -> Tuple[float, float]:
             best = _unit(vx, vy)
 
     return best
+
+
+def clip_polygon_by_depth(points2: List[Point2], depth_m: float) -> List[Point2]:
+    """
+    Clip an open-ring polygon by inward halfspace defined by the longest edge
+    (front edge) and depth 'depth_m' inside the parcel.
+
+    Returns an open ring (no repeated last point). If the clipped polygon has
+    fewer than 3 vertices, returns the original polygon (safe fallback).
+    """
+    pts = _ensure_ring_open(points2)
+    if len(pts) < 3:
+        return pts
+
+    # Compute centroid to decide inward direction
+    cx = sum(p[0] for p in pts) / len(pts)
+    cy = sum(p[1] for p in pts) / len(pts)
+
+    # find longest edge A->B
+    best_len = -1.0
+    best_idx = 0
+    npts = len(pts)
+    for i in range(npts):
+        x1, y1 = pts[i]
+        x2, y2 = pts[(i + 1) % npts]
+        L = math.hypot(x2 - x1, y2 - y1)
+        if L > best_len:
+            best_len = L
+            best_idx = i
+
+    A = pts[best_idx]
+    B = pts[(best_idx + 1) % npts]
+
+    # inward normal candidate (rotate edge +90deg) and flip if it points outside
+    ex, ey = (B[0] - A[0], B[1] - A[1])
+    n0x, n0y = (-ey, ex)
+    if (n0x * (cx - A[0]) + n0y * (cy - A[1])) < 0:
+        n0x, n0y = -n0x, -n0y
+    nx, ny = _unit(n0x, n0y)
+
+    # halfspace test: dot(n, p - A) <= depth_m  => v(p) = dot(n, p - A) - depth_m <= 0
+    def v(p):
+        return (nx * (p[0] - A[0]) + ny * (p[1] - A[1]) - float(depth_m))
+
+    eps = 1e-9
+    out = []
+    for i in range(npts):
+        s = pts[i]
+        e = pts[(i + 1) % npts]
+        vs = v(s)
+        ve = v(e)
+        s_in = vs <= eps
+        e_in = ve <= eps
+
+        if s_in and e_in:
+            out.append(e)
+        elif s_in and not e_in:
+            denom = (vs - ve)
+            if abs(denom) > 1e-12:
+                t = vs / (vs - ve)
+                ix = s[0] + t * (e[0] - s[0])
+                iy = s[1] + t * (e[1] - s[1])
+                out.append((ix, iy))
+        elif (not s_in) and e_in:
+            denom = (vs - ve)
+            if abs(denom) > 1e-12:
+                t = vs / (vs - ve)
+                ix = s[0] + t * (e[0] - s[0])
+                iy = s[1] + t * (e[1] - s[1])
+                out.append((ix, iy))
+            out.append(e)
+        else:
+            # both outside -> nothing
+            pass
+
+    # remove consecutive duplicates
+    def _same(a, b, tol=1e-9):
+        return abs(a[0] - b[0]) <= tol and abs(a[1] - b[1]) <= tol
+
+    cleaned = []
+    for p in out:
+        if not cleaned or not _same(p, cleaned[-1]):
+            cleaned.append(p)
+
+    if cleaned and len(cleaned) >= 3 and _same(cleaned[0], cleaned[-1]):
+        cleaned = cleaned[:-1]
+
+    if len(cleaned) < 3:
+        return pts
+
+    return cleaned
+
+
+def polygon_intersection(subject: List[Point2], clipper: List[Point2]) -> Optional[List[Point2]]:
+    """
+    Intersect two polygons (subject ∩ clipper) using Sutherland–Hodgman clipping
+    where 'clipper' edges act as halfspaces. This is a best-effort implementation
+    (works well when clipper is convex). If the result is degenerate (<3 pts),
+    returns None.
+    """
+    subj = _ensure_ring_open(subject)
+    clip = _ensure_ring_open(clipper)
+
+    if len(subj) < 3 or len(clip) < 3:
+        return None
+
+    def area(poly: List[Point2]) -> float:
+        a = 0.0
+        n = len(poly)
+        for i in range(n):
+            x1, y1 = poly[i]
+            x2, y2 = poly[(i + 1) % n]
+            a += (x1 * y2 - x2 * y1)
+        return 0.5 * a
+
+    # ensure clipper is CCW for consistent inside test
+    if area(clip) < 0:
+        clip = list(reversed(clip))
+
+    def cross(ax, ay, bx, by):
+        return ax * by - ay * bx
+
+    def is_inside(p: Point2, a: Point2, b: Point2) -> bool:
+        return cross(b[0] - a[0], b[1] - a[1], p[0] - a[0], p[1] - a[1]) >= -1e-9
+
+    def intersect_seg_line(s: Point2, e: Point2, a: Point2, b: Point2) -> Optional[Point2]:
+        # line AB intersection with segment SE
+        ax, ay = a; bx, by = b
+        sx, sy = s; ex, ey = e
+        ux, uy = bx - ax, by - ay
+        vx, vy = ex - sx, ey - sy
+        denom = cross(ux, uy, -vx, -vy)
+        if abs(denom) < 1e-12:
+            return None
+        t = cross(ux, uy, ax - sx, ay - sy) / denom
+        return (sx + t * vx, sy + t * vy)
+
+    output = subj
+    for i in range(len(clip)):
+        A = clip[i]
+        B = clip[(i + 1) % len(clip)]
+        input_list = output
+        output = []
+        if not input_list:
+            break
+        s = input_list[-1]
+        for e in input_list:
+            s_in = is_inside(s, A, B)
+            e_in = is_inside(e, A, B)
+            if s_in and e_in:
+                output.append(e)
+            elif s_in and not e_in:
+                ip = intersect_seg_line(s, e, A, B)
+                if ip:
+                    output.append(ip)
+            elif not s_in and e_in:
+                ip = intersect_seg_line(s, e, A, B)
+                if ip:
+                    output.append(ip)
+                output.append(e)
+            s = e
+
+    # clean duplicates
+    def _same(a, b, tol=1e-9):
+        return abs(a[0] - b[0]) <= tol and abs(a[1] - b[1]) <= tol
+
+    cleaned = []
+    for p in output:
+        if not cleaned or not _same(p, cleaned[-1]):
+            cleaned.append(p)
+
+    if len(cleaned) >= 3:
+        if len(cleaned) >= 2 and _same(cleaned[0], cleaned[-1]):
+            cleaned = cleaned[:-1]
+        if len(cleaned) >= 3:
+            return cleaned
+    return None
+
+
+def convex_hull(points: List[Point2]) -> List[Point2]:
+    """
+    Compute the convex hull of a set of 2D points using the monotone chain
+    algorithm and return an open ring (no repeated last point).
+    """
+    pts = _ensure_ring_open(points)
+    # sort unique points
+    pts_sort = sorted(set(pts))
+    if len(pts_sort) <= 1:
+        return pts_sort
+
+    def cross(o, a, b):
+        return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
+
+    lower = []
+    for p in pts_sort:
+        while len(lower) >= 2 and cross(lower[-2], lower[-1], p) <= 0:
+            lower.pop()
+        lower.append(p)
+
+    upper = []
+    for p in reversed(pts_sort):
+        while len(upper) >= 2 and cross(upper[-2], upper[-1], p) <= 0:
+            upper.pop()
+        upper.append(p)
+
+    hull = lower[:-1] + upper[:-1]
+    if len(hull) >= 3:
+        return hull
+    return pts
 
 
 def _support_point(pts: List[Point2], ux: float, uy: float, take_max: bool) -> Point2:
@@ -178,20 +387,21 @@ def _make_spatial_structure(model: ifcopenshell.file, project, zone_key: str):
     return storey
 
 
-def _place_proxy_at_offset(model: ifcopenshell.file, proxy, ox: float, oy: float, z_dir, x_dir):
+def _place_proxy_at_offset(model: ifcopenshell.file, proxy, ox: float, oy: float, oz: float, z_dir, x_dir):
     """
-    Place proxy at world offset (ox,oy,0). Geometry itself is local (small coords).
+    Place proxy at world offset (ox,oy,oz). Geometry itself is local (small coords).
     """
     proxy.ObjectPlacement = model.create_entity(
         "IfcLocalPlacement",
         PlacementRelTo=None,
         RelativePlacement=model.create_entity(
             "IfcAxis2Placement3D",
-            Location=model.create_entity("IfcCartesianPoint", Coordinates=(float(ox), float(oy), 0.0)),
+            Location=model.create_entity("IfcCartesianPoint", Coordinates=(float(ox), float(oy), float(oz))),
             Axis=z_dir,
             RefDirection=x_dir,
         ),
     )
+
 
 
 def _attach_proxy_to_storey(model: ifcopenshell.file, storey, proxy):
@@ -315,11 +525,11 @@ def _make_ifc_plane(model, origin_xyz, normal_xyz):
 def _make_halfspace(model, plane, keep_side: str):
     """
     Create IfcHalfSpaceSolid.
-    AgreementFlag viewer'lara göre hassas olabiliyor.
+    Note: AgreementFlag can be interpreted differently by some IFC viewers.
 
     keep_side:
-      - "below": roof plane'in altında kalan hacmi tut (envelope mantığı)
-      - "above": roof plane'in üstünü tut
+        - "below": keep volume below the roof plane (envelope behavior)
+        - "above": keep volume above the plane
     """
     agreement = True if keep_side == "below" else False
     return model.create_entity("IfcHalfSpaceSolid", BaseSurface=plane, AgreementFlag=agreement)
@@ -328,7 +538,7 @@ def _make_halfspace(model, plane, keep_side: str):
 def _horizontal_halfspace(model, z: float, keep: str):
     """
     Horizontal plane at height z. Used to force roof to start ABOVE eaves.
-    keep="above" -> keep z >= threshold (viewer uyumu için AgreementFlag ters seçilebilir)
+    keep="above" -> keep z >= threshold (AgreementFlag may be inverted by some viewers)
     """
     plane = _make_ifc_plane(model, origin_xyz=(0.0, 0.0, z), normal_xyz=(0.0, 0.0, 1.0))
     agreement = False if keep == "above" else True
@@ -341,14 +551,60 @@ def _bool(model, op: str, a, b):
 
 def _assign_layer(model, items, layer_name: str):
     """
-    AssignItems üzerinden layer atar.
-    Bu yöntem IfcBooleanResult / IfcBooleanClippingResult gibi item'larda da çalışır.
+    Assigns a presentation layer to representation items.
+    Works for items such as IfcBooleanResult / IfcBooleanClippingResult as well.
     """
     model.create_entity(
         "IfcPresentationLayerAssignment",
         Name=layer_name,
-        AssignedItems=list(items)  # <-- kritik: burada bağlanıyor
+        AssignedItems=list(items)  # <-- critical: items are linked here
     )
+
+def create_ground_volume(
+    model: ifcopenshell.file,
+    context,
+    storey,
+    pts2_local,
+    ox: float,
+    oy: float,
+    z_dir,
+    x_dir,
+    ground_height: float = 1.0,
+    layer_name: str = "CADASTER_GROUND",
+    name: str = "CadasterGround",
+):
+    ground_proxy = model.create_entity(
+        "IfcBuildingElementProxy",
+        GlobalId=_new_guid(),
+        Name=name,
+        ObjectType="CADASTER_GROUND",
+    )
+
+    # Ground placement: Z = -1.0 (bottom of ground slab), height = 1.0 -> top at Z = 0.0
+    _place_proxy_at_offset(model, ground_proxy, ox, oy, -1.0, z_dir, x_dir)
+    _attach_proxy_to_storey(model, storey, ground_proxy)
+
+    profile = _make_closed_profile(model, pts2_local)
+    solid = _make_extruded_solid(model, profile, depth=float(ground_height))
+
+    shape_rep = model.create_entity(
+        "IfcShapeRepresentation",
+        ContextOfItems=context,
+        RepresentationIdentifier="Body",
+        RepresentationType="SweptSolid",
+        Items=[solid],
+    )
+
+    # Layer assignment must target representation items
+    _assign_layer(model, shape_rep.Items, layer_name)
+
+    ground_proxy.Representation = model.create_entity(
+        "IfcProductDefinitionShape",
+        Representations=[shape_rep],
+    )
+
+    return ground_proxy
+
 
 def _style_item(model, item, rgb=(0.2, 0.6, 1.0), transparency=0.75, name="Style"):
     """
@@ -410,12 +666,15 @@ def _clip_intersections(model, base, halfspaces):
 # Roof logic (HIP roof)
 # =============================================================================
 
-def _hip_roof_halfspaces(model, pts2: List[Point2], h_eaves: float, slope_deg: float):
+def _hip_roof_halfspaces(model, pts2: List[Point2], h_eaves: float, slope_deg: float, max_rise_m: Optional[float] = None):
     """
     Build 4 roof planes for a hip roof:
     - 2 planes along ridge-perpendicular axis (S)
     - 2 planes along ridge axis (R)
     Planes are anchored at actual polygon support points (not bbox).
+
+    Optional `max_rise_m` caps the computed rise to avoid very tall narrow wedges
+    on pathological parcels.
     """
     pts2 = _ensure_ring_open(pts2)
     t = math.tan(math.radians(slope_deg))
@@ -436,6 +695,12 @@ def _hip_roof_halfspaces(model, pts2: List[Point2], h_eaves: float, slope_deg: f
 
     # Max rise (for roof_base height)
     rise_max = max(half_r, half_s) * t
+
+    # Apply cap if requested
+    if max_rise_m is not None and rise_max > float(max_rise_m):
+        orig = rise_max
+        rise_max = float(max_rise_m)
+        print(f"[ROOF] rise_max capped from {orig:.3f} to {rise_max:.3f}")
 
     planes = []
 
@@ -473,6 +738,10 @@ def create_ifc_envelope(
     out_path: str,
     roof_slope_deg_real: Optional[float] = None,
     roof_slope_deg_virtual: Optional[float] = None,
+    ground_height: float = 1.0,
+    depth_m: Optional[float] = None,
+    max_roof_rise_m: Optional[float] = None,
+    ground_footprint_points=None,
 ):
     """
     Create one IFC representing the parcel envelope.
@@ -505,8 +774,58 @@ def create_ifc_envelope(
     )
 
     # Localize footprint and place proxy back at world offset
-    pts2_local, (ox, oy) = _to_local_xy(footprint_points)
-    _place_proxy_at_offset(model, proxy, ox, oy, z_dir, x_dir)
+    # Localize ENVELOPE footprint (for envelope + roof math)
+    env_pts2_local, (ox, oy) = _to_local_xy(footprint_points)
+
+    # Localize GROUND footprint (defaults to envelope footprint if not provided)
+    ground_fp = ground_footprint_points or footprint_points
+    ground_pts2_local, (gox, goy) = _to_local_xy(ground_fp)
+
+    # 1) Cadastre ground (always create, parcel footprint, fixed -1..0 Z range)
+    create_ground_volume(
+        model=model,
+        context=context,
+        storey=storey,
+        pts2_local=ground_pts2_local,
+        ox=gox, oy=goy,
+        z_dir=z_dir, x_dir=x_dir,
+        ground_height=float(ground_height),
+        layer_name="CADASTER_GROUND",
+    )
+
+    # Use envelope footprint from here on
+    pts2_local = env_pts2_local
+
+    # Buildable footprint: clip by maximum depth (PROFEDIF) if provided.
+    if depth_m is not None and depth_m > 0.0:
+        pts2_buildable = clip_polygon_by_depth(pts2_local, float(depth_m))
+    else:
+        pts2_buildable = pts2_local
+
+    # Debug: report depth clipping outcome
+    if depth_m is not None:
+        try:
+            cx = sum(x for x, y in pts2_local) / len(pts2_local)
+            cy = sum(y for x, y in pts2_local) / len(pts2_local)
+            best_len = -1; best_idx = 0
+            for i in range(len(pts2_local)):
+                x1, y1 = pts2_local[i]
+                x2, y2 = pts2_local[(i + 1) % len(pts2_local)]
+                L = math.hypot(x2 - x1, y2 - y1)
+                if L > best_len:
+                    best_len = L; best_idx = i
+            A = pts2_local[best_idx]; B = pts2_local[(best_idx + 1) % len(pts2_local)]
+            n0x, n0y = (-(B[1] - A[1]), (B[0] - A[0]))
+            if (n0x * (cx - A[0]) + n0y * (cy - A[1])) < 0:
+                n0x, n0y = -n0x, -n0y
+            nx, ny = _unit(n0x, n0y)
+            max_proj = max(nx * (p[0] - A[0]) + ny * (p[1] - A[1]) for p in pts2_local)
+            print(f"[DEPTH] depth_m={depth_m}, max_proj={max_proj:.3f}, orig_pts={len(pts2_local)}, buildable_pts={len(pts2_buildable)}")
+        except Exception as e:
+            print(f"[DEPTH] debug failed: {e}")
+
+    # 2) Envelope starts at legal ground level (Z = 0.0)
+    _place_proxy_at_offset(model, proxy, ox, oy, 0.0, z_dir, x_dir) 
 
     # Attach constraints (optional metadata)
     _add_pset_roof_slopes(model, proxy, roof_slope_deg_real, roof_slope_deg_virtual)
@@ -514,8 +833,8 @@ def create_ifc_envelope(
     # Contain in storey
     _attach_proxy_to_storey(model, storey, proxy)
 
-    # 2D profile in local coords
-    profile = _make_closed_profile(model, pts2_local)
+    # 2D profile in local coords (buildable footprint for envelope/roof)
+    profile = _make_closed_profile(model, pts2_buildable)
     h_eaves = float(height)
 
     # -------------------------------------------------------------------------
@@ -537,7 +856,7 @@ def create_ifc_envelope(
         walls_solid = _make_extruded_solid(model, profile, depth=h_eaves)
 
         # Build a tall roof base, clip by hip planes
-        halfspaces_roof, rise_max = _hip_roof_halfspaces(model, pts2_local, h_eaves, float(roof_slope_deg_real))
+        halfspaces_roof, rise_max = _hip_roof_halfspaces(model, pts2_buildable, h_eaves, float(roof_slope_deg_real), max_rise_m=max_roof_rise_m)
         big_height = h_eaves + rise_max + 1.0
         roof_base = _make_extruded_solid(model, profile, depth=big_height)
 
@@ -562,7 +881,7 @@ def create_ifc_envelope(
             RepresentationType="CSG",
             Items=[envelope_solid],
         )
-        # Layer'ı shape_rep yaratıldıktan sonra ata
+        # Assign layer after shape_rep is created
         _assign_layer(model, shape_rep.Items, "REAL_ENVELOPE")
 
 
@@ -583,14 +902,14 @@ def create_ifc_envelope(
         )
 
         # Same placement offset (so it sits exactly on the footprint)
-        _place_proxy_at_offset(model, virtual_proxy, ox, oy, z_dir, x_dir)
+        _place_proxy_at_offset(model, virtual_proxy, ox, oy, 0.0, z_dir, x_dir)
         _attach_proxy_to_storey(model, storey, virtual_proxy)
 
         # Optional: also store both constraints on the virtual element
         _add_pset_roof_slopes(model, virtual_proxy, roof_slope_deg_real, roof_slope_deg_virtual)
 
         # Build virtual roof wedge with virtual slope
-        hs_virtual, rise_v = _hip_roof_halfspaces(model, pts2_local, h_eaves, float(roof_slope_deg_virtual))
+        hs_virtual, rise_v = _hip_roof_halfspaces(model, pts2_buildable, h_eaves, float(roof_slope_deg_virtual), max_rise_m=max_roof_rise_m)
         big_h_v = h_eaves + rise_v + 1.0
         roof_base_v = _make_extruded_solid(model, profile, depth=big_h_v)
 
@@ -617,7 +936,7 @@ def create_ifc_envelope(
         # Put virtual roof on its own layer
         _assign_layer(model, virtual_shape_rep.Items, "VIRTUAL_ROOF")
 
-        # ŞEFFAFLIK + RENK (Virtual roof)
+        # Transparency + color (virtual roof)
         for it in virtual_shape_rep.Items:
             _style_item(model, it, rgb=(0.2, 0.6, 1.0), transparency=0.75, name="VirtualRoofStyle")
 

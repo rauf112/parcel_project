@@ -1,3 +1,19 @@
+"""
+FastAPI entrypoint for the parcel envelope generation service.
+
+Responsibilities
+----------------
+- Serves a small UI from /static and the root path.
+- Exposes endpoints to list municipalities/parcels and to generate IFC envelopes.
+- Runs long-running generation tasks in background threads (per job).
+- Provides job status, logs, and download links for generated IFC files.
+
+Notes
+-----
+- Job state is kept in memory (see jobs.py); restarting the process clears jobs.
+- Batch generation uses throttling constants to avoid WFS overload.
+"""
+
 from __future__ import annotations
 
 from fastapi import FastAPI, HTTPException
@@ -23,11 +39,13 @@ app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 @app.get("/", include_in_schema=False)
 def ui_home():
+    """Serve the UI index.html file."""
     return FileResponse(str(STATIC_DIR / "index.html"))
 
 
 @app.get("/health", include_in_schema=False)
 def health():
+    """Simple health check endpoint."""
     return {"ok": True, "message": "Backend is running."}
 
 
@@ -42,22 +60,26 @@ MUNICIPALITY_TO_SLUG = {"Malgrat de Mar": "malgrat"}
 
 
 class GenerateRequest(BaseModel):
+    """Request body for /generate."""
     municipality: str
     all_parcels: bool
     refcat: Optional[str] = None
 
 
 class GenerateResponse(BaseModel):
+    """Response body for /generate."""
     job_id: str
 
 
 @app.get("/municipalities")
 def get_municipalities() -> List[str]:
+    """Return supported municipalities configured for this instance."""
     return DEFAULT_MUNICIPALITIES
 
 
 @app.get("/parcels")
 def get_parcels(municipality: str) -> List[str]:
+    """Return parcel refcats for a municipality, backed by POUM data."""
     if municipality not in DEFAULT_MUNICIPALITIES:
         raise HTTPException(status_code=400, detail="Unknown municipality")
     try:
@@ -67,18 +89,21 @@ def get_parcels(municipality: str) -> List[str]:
 
 
 # -------- Batch tuning knobs --------
-CHUNK_SIZE = 20          # ✅ 20'li 20'li
-REQUEST_DELAY = 0.30     # her WFS çağrısı sonrası 300ms
-CHUNK_DELAY = 1.50       # her 20'li grup sonrası 1.5sn nefes
-MAX_FAILS = 200          # çok hata olursa job'u durdur
+# The following values throttle batch requests to avoid overloading WFS.
+CHUNK_SIZE = 20          # Number of parcels per batch
+REQUEST_DELAY = 0.30     # Delay (s) after each WFS call
+CHUNK_DELAY = 1.50       # Delay (s) after each batch
+MAX_FAILS = 200          # Abort job if failures exceed this
 
 
 def _chunks(lst: List[str], n: int):
+    """Yield list chunks of size n."""
     for i in range(0, len(lst), n):
         yield lst[i:i + n]
 
 
 def run_job(job: Job) -> None:
+    """Execute a job (single or batch) and update its state/logs in place."""
     job.status = "running"
     job.started_at = time.time()
     append_log(job, "Job started")
@@ -110,7 +135,7 @@ def run_job(job: Job) -> None:
                             municipality_slug=municipality_slug,
                         )
 
-                        # kanıt log
+                        # diagnostic log
                         append_log(job, f"Zone={result.get('zone')} | rule_sources={result.get('rule_sources')}")
 
                         if not result.get("skipped") and result.get("ifc_path"):
@@ -120,7 +145,7 @@ def run_job(job: Job) -> None:
                         fails += 1
                         append_log(job, f"ERROR rc={refcat} -> {type(e).__name__}: {e}")
 
-                        # çok hata olursa kes
+                        # Abort if too many failures
                         if fails >= MAX_FAILS:
                             job.status = "error"
                             job.finished_at = time.time()
@@ -155,7 +180,7 @@ def run_job(job: Job) -> None:
                 municipality_slug=municipality_slug,
             )
 
-            # kanıt log
+            # diagnostic log
             append_log(job, f"Zone={result.get('zone')} | rule_sources={result.get('rule_sources')}")
 
             if result.get("skipped"):
@@ -188,6 +213,7 @@ def run_job(job: Job) -> None:
 
 @app.post("/generate", response_model=GenerateResponse)
 def post_generate(req: GenerateRequest):
+    """Create a new job (single or batch) and start it in a background thread."""
     if req.municipality not in DEFAULT_MUNICIPALITIES:
         raise HTTPException(status_code=400, detail="Unknown municipality")
 
@@ -204,6 +230,7 @@ def post_generate(req: GenerateRequest):
 
 @app.get("/jobs/{job_id}")
 def get_job_status(job_id: str) -> Dict[str, Any]:
+    """Return job status, progress, logs, and downloadable files."""
     job = get_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -231,6 +258,7 @@ def get_job_status(job_id: str) -> Dict[str, Any]:
 
 @app.get("/download/{job_id}/{filename}")
 def download_file(job_id: str, filename: str):
+    """Download a generated IFC file for a job."""
     job = get_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")

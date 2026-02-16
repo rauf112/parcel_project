@@ -1,0 +1,14 @@
+{
+  "poum_gml_path": "POUM.gml",
+  "ground_height": 1.0,
+  "default_depth_m": 3.0,
+  "force_depth_m": true,
+  "debug_depth_log": true,
+  "polygon_source": "both",
+  "poum_mode": "parcel",
+  "poum_zone_area_ratio_threshold": 5.0,
+  "poum_simplify_zone": true,
+  "poum_simplify_method": "convex_hull",
+  "poum_zone_intersection": true,
+  "roof_rise_max_m": 15.0
+}

@@ -1,3 +1,24 @@
+"""
+Pipeline orchestration for parcel envelope generation.
+
+Responsibilities
+----------------
+- Loads and caches POUM indices.
+- Resolves parcel polygon source (POUM, Cadastre, or both).
+- Applies zoning rules to compute height/depth and roof constraints.
+- Exports IFC envelope files and normalizes output paths.
+
+Data flow
+---------
+- refcat -> polygon (POUM/Cadastre) -> rules (regulations/POUM/default)
+    -> IFC envelope (ifc_exporter) -> normalized output path.
+
+Notes
+-----
+- Configuration supports layered overrides (default → config.json → ENV override).
+- Cadastre WFS failures are handled with fallbacks when possible.
+"""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -5,6 +26,8 @@ from typing import Dict, Any, List, Optional, Tuple
 import time
 import shutil
 import math
+import json
+import os
 
 from pyproj import Transformer
 
@@ -14,7 +37,7 @@ import regulations
 from ifc_exporter import create_ifc_envelope
 
 
-# --- simple cache for POUM index ---
+# --- Simple cache for POUM index ---
 _POUM_CACHE: Dict[str, Any] = {
     "path": None,
     "mtime": None,
@@ -34,6 +57,72 @@ def _get_poum_index(poum_gml_path: str) -> Dict[str, PoumInfo]:
     return _POUM_CACHE["index"]
 
 
+# -----------------------------------------------------------------------------
+# Configuration loader
+# -----------------------------------------------------------------------------
+
+_CONFIG_PATHS = [Path("backend/config.json"), Path("config.json")]
+
+
+def _load_config() -> dict:
+    """Load configuration with layered precedence.
+
+    Precedence (low -> high):
+      1) code defaults (hardcoded)
+      2) `backend/config.json` (if present)
+      3) file pointed by ENV `ENVELOPE_CONFIG_PATH` (if present)
+
+    Keys supported:
+      - ground_height: float
+      - default_depth_m: float or null
+      - force_depth_m: bool
+      - debug_depth_log: bool
+      - polygon_source: 'poum'|'cadastre'|'both'
+      - poum_mode: 'parcel'|'zone'
+      - poum_zone_area_ratio_threshold: float
+      - poum_simplify_zone: bool
+      - poum_simplify_method: string
+      - roof_rise_max_m: float
+    """
+    # Base: code defaults
+    defaults = {
+        "ground_height": 1.0,
+        "default_depth_m": None,
+        "force_depth_m": False,
+        "debug_depth_log": False,
+        "polygon_source": "both",
+        "poum_mode": "parcel",
+        "poum_zone_area_ratio_threshold": 3.0,
+        "poum_simplify_zone": True,
+        "poum_simplify_method": "convex_hull",
+        "roof_rise_max_m": 10.0,
+        "poum_zone_intersection": True,
+    }
+
+    # Merge backend/config.json (if exists)
+    for cp in _CONFIG_PATHS:
+        if cp.exists():
+            try:
+                cfg = json.loads(cp.read_text())
+                if isinstance(cfg, dict):
+                    defaults.update(cfg)
+            except Exception:
+                pass
+
+    # Merge env override file (highest precedence)
+    envp = os.environ.get("ENVELOPE_CONFIG_PATH")
+    if envp:
+        try:
+            cfg = json.loads(Path(envp).read_text())
+            if isinstance(cfg, dict):
+                defaults.update(cfg)
+        except Exception:
+            pass
+
+    return defaults
+
+
+
 def list_refcats_from_poum(poum_gml_path: str) -> List[str]:
     idx = _get_poum_index(poum_gml_path)
     return sorted(idx.keys())
@@ -42,7 +131,7 @@ def list_refcats_from_poum(poum_gml_path: str) -> List[str]:
 def _utm_epsg_from_lon_lat(lon: float, lat: float) -> int:
     # UTM zone from longitude
     zone = int(math.floor((lon + 180) / 6) + 1)
-    # north hemisphere
+    # North hemisphere
     return 32600 + zone if lat >= 0 else 32700 + zone
 
 
@@ -71,8 +160,8 @@ def _ensure_closed(points: List[Tuple[float, float]]) -> List[Tuple[float, float
 
 def _normalize_output_to_root(ifc_path: str, output_dir: Path) -> str:
     """
-    IFC alt klasöre yazılmışsa outputs/ köküne taşır.
-    Alt klasör boş kalırsa siler.
+    If an IFC file is written to a subfolder, move it to the output root.
+    Deletes the subfolder if it becomes empty.
     """
     p = Path(ifc_path)
     output_dir = Path(output_dir)
@@ -108,11 +197,10 @@ def _normalize_output_to_root(ifc_path: str, output_dir: Path) -> str:
 
 def _pick_height_and_depth(zone: str, poum_info: Optional[PoumInfo]) -> tuple[float, Optional[float], list[str]]:
     """
-    Öncelik:
-      height: regulations varsa REGULATIONS, yoksa POUM(ALTMAX), yoksa DEFAULT_RULE
-      depth: regulations varsa REGULATIONS (max_building_depth_m),
-             yoksa POUM(PROFEDIF),
-             yoksa None -> fallback BBX (main tarafı 'BBX' diye logluyordu)
+    Priority rules:
+        height: regulations → POUM(ALTMAX) → DEFAULT_RULE
+        depth : regulations(max_building_depth_m) → POUM(PROFEDIF) → None (fallback BBX)
+    Returns (height, depth, rule_sources) where rule_sources records the origin.
     """
     rule_sources: list[str] = []
 
@@ -154,6 +242,17 @@ def _bbox_depth(points_xy: List[Tuple[float, float]]) -> float:
     return float(max(max(xs) - min(xs), max(ys) - min(ys)))
 
 
+def _polygon_area(points_xy: List[Tuple[float, float]]) -> float:
+    """Return absolute polygon area (m^2)."""
+    pts = _ensure_closed(points_xy)
+    a = 0.0
+    for i in range(len(pts) - 1):
+        x1, y1 = pts[i]
+        x2, y2 = pts[i + 1]
+        a += (x1 * y2 - x2 * y1)
+    return abs(0.5 * a)
+
+
 def generate_one(
     refcat: str,
     poum_gml_path: str,
@@ -161,8 +260,8 @@ def generate_one(
     municipality_slug: str = "malgrat",
 ) -> Dict[str, Any]:
     """
-    Tek parsel için:
-    WFS -> polygon -> POUM zone -> (regulations or POUM numeric) -> IFC
+    Generate a single parcel envelope:
+    WFS/POUM polygon → POUM zone → rules (regulations/POUM/default) → IFC
     """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -172,28 +271,138 @@ def generate_one(
 
     zone = (poum_info.zone if poum_info else None) or "UNKNOWN"
 
-    # 1) WFS polygon (WGS84)
-    try:
-        lonlat = get_parcel_polygon_by_local_id(refcat)
-    except Exception as e:
-        msg = str(e)
-        # WFS bakım/HTML vs
-        if "<html" in msg.lower() or "text/html" in msg.lower():
-            raise RuntimeError("Service unavailable (WFS returned HTML / maintenance).") from e
-        raise
+    # 1) Attempt to obtain polygon according to config: POUM, Cadastre or both
+    config = _load_config()
+    polygon_source = config.get("polygon_source", "both")
+    xy = None
 
-    # 2) Project to meters
-    xy = _transform_wgs84_to_utm(lonlat)
+    if polygon_source in ("poum", "both"):
+        # Try to get polygon from POUM.gml (already in EPSG:25831)
+        from poum_index import get_polygon_by_refcat
+
+        poum_mode = config.get("poum_mode", "parcel")  # 'parcel' or 'zone'
+        strict = True if poum_mode == "parcel" else False
+
+        poum_poly = get_polygon_by_refcat(poum_gml_path, refcat, strict=strict)
+        if poum_poly:
+            # If strict (parcel), it's exact
+            if strict:
+                xy = poum_poly
+                if config.get("debug_depth_log"):
+                    print(f"[SRC] Using POUM polygon for {refcat} (mode={poum_mode})")
+            else:
+                # Non-strict: simplify zone polygons, compare areas, and intersect with cadastre
+                try:
+                    # Optional: simplify POUM zone to reduce concavity
+                    poum_poly_use = poum_poly
+                    if config.get("poum_simplify_zone") and config.get("poum_simplify_method", "convex_hull") == "convex_hull":
+                        from ifc_exporter import convex_hull
+                        try:
+                            simplified = convex_hull(poum_poly)
+                            poum_poly_use = simplified
+                            if config.get("debug_depth_log"):
+                                print(f"[SRC] Simplified POUM zone polygon for {refcat}: {len(poum_poly)} -> {len(simplified)} pts")
+                        except Exception:
+                            # Fallback to original if simplification fails
+                            poum_poly_use = poum_poly
+
+                    lonlat = get_parcel_polygon_by_local_id(refcat)
+                    cad_xy = _transform_wgs84_to_utm(lonlat)
+                    cad_xy = _ensure_closed(cad_xy)
+
+                    # Area checks to avoid using very large zone polygons
+                    a_cad = _polygon_area(cad_xy)
+                    a_poum = _polygon_area(poum_poly_use)
+                    threshold = float(config.get("poum_zone_area_ratio_threshold", 3.0))
+
+                    # If intersection is disabled by config, choose behavior:
+                    # - Prefer CADASTRE if polygon_source includes it; otherwise use raw POUM zone
+                    if not config.get("poum_zone_intersection", True):
+                        if polygon_source in ("cadastre", "both"):
+                            xy = cad_xy
+                            if config.get("debug_depth_log"):
+                                print(f"[SRC] POUM zone intersection disabled for {refcat}; using CADASTRE parcel")
+                        else:
+                            xy = poum_poly_use
+                            if config.get("debug_depth_log"):
+                                print(f"[SRC] POUM zone intersection disabled for {refcat}; using POUM zone polygon")
+
+                    else:
+                        if a_cad > 0 and (a_poum / a_cad) > threshold:
+                            xy = cad_xy
+                            if config.get("debug_depth_log"):
+                                print(f"[SRC] POUM zone too large for {refcat} (area_ratio={a_poum/a_cad:.1f} > {threshold}); using CADASTRE parcel")
+                        else:
+                            from ifc_exporter import polygon_intersection
+                            inter = polygon_intersection(cad_xy, poum_poly_use)
+                            if inter is not None:
+                                xy = inter
+                                if config.get("debug_depth_log"):
+                                    print(f"[SRC] Using POUM (zone) intersected with CADASTRE for {refcat}")
+                            else:
+                                xy = cad_xy
+                                if config.get("debug_depth_log"):
+                                    print(f"[SRC] POUM provided zone for {refcat} but intersection failed; using CADASTRE parcel")
+                except Exception as e:
+                    # Cadastre fetch failed; if in 'both' mode, fall back to POUM polygon
+                    if polygon_source == "both":
+                        xy = poum_poly_use
+                        if config.get("debug_depth_log"):
+                            print(f"[SRC] POUM polygon used for {refcat} (cadastre fetch failed: {e})")
+                    else:
+                        raise
+        else:
+            # If strict and not found, check if a non-strict POUM feature exists
+            if strict:
+                maybe = get_polygon_by_refcat(poum_gml_path, refcat, strict=False)
+                if maybe is not None and config.get("debug_depth_log"):
+                    print(f"[SRC] POUM has a feature containing {refcat}, but it's a grouped/zone feature; falling back")
+            if polygon_source == "poum":
+                raise RuntimeError(f"Parcel {refcat} not found in POUM.gml (mode={poum_mode}) and polygon_source=poum")
+
+    if xy is None and polygon_source in ("cadastre", "both"):
+        # Fallback to cadastre WFS
+        try:
+            lonlat = get_parcel_polygon_by_local_id(refcat)
+        except Exception as e:
+            msg = str(e)
+            # WFS maintenance / HTML responses
+            if "<html" in msg.lower() or "text/html" in msg.lower():
+                raise RuntimeError("Service unavailable (WFS returned HTML / maintenance).") from e
+            raise
+
+        # 2) Project to meters
+        xy = _transform_wgs84_to_utm(lonlat)
+        if config.get("debug_depth_log"):
+            print(f"[SRC] Using CADASTRE WFS polygon for {refcat}")
+
+    if not xy:
+        raise RuntimeError(f"Parcel {refcat} not found in POUM.gml nor in cadastre WFS")
+
     xy = _ensure_closed(xy)
 
-    # 3) rules
+    # 3) Rules
     height_m, depth_m, rule_sources = _pick_height_and_depth(zone, poum_info)
 
-    # depth fallback: bbx
+    # Load config (may override or provide defaults)
+    config = _load_config()
+
+    # If a default depth is configured, apply it as fallback; if force_depth_m is True,
+    # it overrides any rule-derived depth
+    cfg_default = config.get("default_depth_m")
+    if config.get("force_depth_m") and cfg_default is not None:
+        depth_m = float(cfg_default)
+        rule_sources.append("depth:FORCE_CONFIG")
+    else:
+        if depth_m is None and cfg_default is not None:
+            depth_m = float(cfg_default)
+            rule_sources.append("depth:CONFIG_DEFAULT")
+
+    # Depth fallback: bounding-box depth
     if depth_m is None:
         depth_m = _bbox_depth(xy)
 
-    # 4) Standard filename (tek tip)
+    # 4) Standard filename
     safe_zone = zone.replace("/", "_").replace("\\", "_").replace(" ", "_")
     out_name = f"{municipality_slug}_{refcat}_{safe_zone}_envelope.ifc"
     out_path = output_dir / out_name
@@ -202,16 +411,27 @@ def generate_one(
     real_slope_deg, virtual_slope_deg, roof_sources = _pick_roof_slopes(zone)
     rule_sources.extend(roof_sources)
 
+    # Use configured ground_height if present
+    ground_h = config.get("ground_height", 1.0)
+
+    # Optional debug logging for depth decisions
+    if config.get("debug_depth_log"):
+        print(f"[CONFIG] zone={zone}, rule_depth={depth_m}, sources={rule_sources}")
+
     create_ifc_envelope(
+        ground_footprint_points=xy,  
         footprint_points=xy,
         height=height_m,
         zone_key=zone,
         out_path=str(out_path),
         roof_slope_deg_real=real_slope_deg,
         roof_slope_deg_virtual=virtual_slope_deg,
+        ground_height=ground_h,
+        depth_m=depth_m,
+        max_roof_rise_m=config.get("roof_rise_max_m"),
     )
 
-    # 6) normalize (olur da exporter alt klasöre yazarsa)
+    # 6) Normalize (in case exporter writes to a subfolder)
     final_path = _normalize_output_to_root(str(out_path), output_dir)
 
     return {
@@ -231,7 +451,7 @@ def _pick_roof_slopes(zone: str) -> Tuple[float, float, list[str]]:
     real = zr.max_roof_slope_deg_real
     virt = zr.max_roof_slope_deg_virtual
 
-    # eğer o zone rule’da slope boşsa default’a düş
+    # If zone rule does not define slopes, fall back to defaults
     if real is None:
         real = regulations.DEFAULT_RULE.max_roof_slope_deg_real
         sources.append("roof_real:FALLBACK_DEFAULT")

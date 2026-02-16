@@ -1,3 +1,17 @@
+"""
+Zoning and envelope regulation rules.
+
+Responsibilities
+----------------
+- Define zone rules (height, depth, roof slopes) for envelope generation.
+- Provide aliasing and default fallbacks for missing zones.
+- Offer helpers to normalize zone codes and retrieve rules.
+
+Notes
+-----
+- This module is purely declarative (data + simple helpers).
+"""
+
 # regulations.py
 from __future__ import annotations
 
@@ -14,7 +28,7 @@ class ZoneRule:
     max_reg_height_m: float
     max_building_depth_m: Optional[float] = None
 
-    # NEW:
+    # Roof slope constraints (real + virtual)
     max_roof_slope_deg_real: Optional[float] = None
     max_roof_slope_deg_virtual: Optional[float] = None
 
@@ -22,10 +36,10 @@ class ZoneRule:
 
 
 # -----------------------------
-# Aliases (solo lo necesario)
+# Aliases (only what is needed)
 # -----------------------------
 ZONE_ALIASES: Dict[str, str] = {
-    # POUM: 18c usa los mismos parámetros que 18b
+    # POUM: 18c uses the same parameters as 18b
     "18c": "18b",
 }
 
@@ -56,7 +70,7 @@ ZONE_RULES: Dict[str, ZoneRule] = {
     ),
 
     # ===== Key 12 (Old Town) =====
-    # GML: 12-1, 12-2 geliyor → aynen destekle
+    # GML: 12-1, 12-2 are present → support as-is
     "12": ZoneRule("12", max_reg_height_m=10.65, max_building_depth_m=None,
                    notes="Casco antiguo. Profundidad según planos; altura Art.75."),
     "12-1": ZoneRule("12-1", max_reg_height_m=10.65, max_building_depth_m=None,
@@ -128,11 +142,13 @@ ZONE_RULES: Dict[str, ZoneRule] = {
 # Helpers
 # -----------------------------
 def canonical_zone(zone_code: str) -> str:
+    """Normalize a zone code using aliases (if any)."""
     z = (zone_code or "").strip()
     return ZONE_ALIASES.get(z, z)
 
 
 def get_rule(zone_code: str) -> ZoneRule:
+    """Return the ZoneRule for a code, falling back to DEFAULT_RULE if missing."""
     z = canonical_zone(zone_code)
     rule = ZONE_RULES.get(z)
     if rule is None:

@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Envelope Pipeline Configuration",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "ground_height": {
+      "type": "number",
+      "description": "Ground height offset in meters applied to the IFC output."
+    },
+    "default_depth_m": {
+      "type": ["number", "null"],
+      "description": "Default building depth (meters) used when depth is missing; can be null."
+    },
+    "force_depth_m": {
+      "type": "boolean",
+      "description": "If true, always override computed depth with default_depth_m."
+    },
+    "debug_depth_log": {
+      "type": "boolean",
+      "description": "If true, prints detailed depth/polygon source debug logs."
+    },
+    "polygon_source": {
+      "type": "string",
+      "enum": ["poum", "cadastre", "both"],
+      "description": "Preferred polygon source: POUM, Cadastre, or both with fallback."
+    },
+    "poum_mode": {
+      "type": "string",
+      "enum": ["parcel", "zone"],
+      "description": "POUM polygon matching mode: exact parcel or zoning zone."
+    },
+    "poum_zone_area_ratio_threshold": {
+      "type": "number",
+      "description": "Max allowed POUM zone area / cadastre area ratio before falling back to cadastre."
+    },
+    "poum_simplify_zone": {
+      "type": "boolean",
+      "description": "If true, simplify POUM zone polygons before intersection."
+    },
+    "poum_simplify_method": {
+      "type": "string",
+      "description": "Simplification method for POUM zones (e.g., 'convex_hull')."
+    },
+    "poum_zone_intersection": {
+      "type": "boolean",
+      "description": "If true, intersect POUM zone polygon with cadastre parcel polygon."
+    },
+    "roof_rise_max_m": {
+      "type": "number",
+      "description": "Max roof rise (meters) for roof geometry generation."
+    }
+  },
+  "required": [
+    "ground_height",
+    "default_depth_m",
+    "force_depth_m",
+    "debug_depth_log",
+    "polygon_source",
+    "poum_mode",
+    "poum_zone_area_ratio_threshold",
+    "poum_simplify_zone",
+    "poum_simplify_method",
+    "poum_zone_intersection",
+    "roof_rise_max_m"
+  ]
+}

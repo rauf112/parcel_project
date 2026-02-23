@@ -10,5 +10,11 @@
   "poum_simplify_zone": true,
   "poum_simplify_method": "convex_hull",
   "poum_zone_intersection": true,
-  "roof_rise_max_m": 15.0
+  "roof_rise_max_m": 15.0,
+  "simplify_source": "both",
+  "simplify_poum_mode": "parcel",
+  "simplify_output_path": "outputs/parcels_simplified.json",
+  "street_max_distance_m": 30.0,
+  "street_offset_m": 0.1,
+  "vertex_angle_threshold_rad": 0.1
 }

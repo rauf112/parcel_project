@@ -49,6 +49,32 @@
     "roof_rise_max_m": {
       "type": "number",
       "description": "Max roof rise (meters) for roof geometry generation."
+    },
+    "simplify_source": {
+      "type": "string",
+      "enum": ["poum", "cadastre", "both"],
+      "description": "Geometry source for SimplifyCadastre-like output generation."
+    },
+    "simplify_poum_mode": {
+      "type": "string",
+      "enum": ["parcel", "zone"],
+      "description": "POUM matching mode used during simplified data generation."
+    },
+    "simplify_output_path": {
+      "type": "string",
+      "description": "Output JSON path for simplified cadastre-like file."
+    },
+    "street_max_distance_m": {
+      "type": "number",
+      "description": "Maximum street-search ray distance in meters."
+    },
+    "street_offset_m": {
+      "type": "number",
+      "description": "Offset from segment midpoint before casting street-search ray."
+    },
+    "vertex_angle_threshold_rad": {
+      "type": "number",
+      "description": "Vertex filtering angle threshold in radians."
     }
   },
   "required": [
@@ -62,6 +88,12 @@
     "poum_simplify_zone",
     "poum_simplify_method",
     "poum_zone_intersection",
-    "roof_rise_max_m"
+    "roof_rise_max_m",
+    "simplify_source",
+    "simplify_poum_mode",
+    "simplify_output_path",
+    "street_max_distance_m",
+    "street_offset_m",
+    "vertex_angle_threshold_rad"
   ]
 }

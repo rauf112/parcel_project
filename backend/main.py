@@ -25,10 +25,12 @@ from typing import List, Optional, Dict, Any
 from pathlib import Path
 import threading
 import time
+import json
 
 from config import POUM_GML_PATH, OUTPUT_DIR, DEFAULT_MUNICIPALITIES
 from jobs import create_job, get_job, append_log, Job
 from pipeline import list_refcats_from_poum, generate_one
+from simplify_cadastre_like import generate_simplified_cadastre_like_file
 
 app = FastAPI(title="Parcel BIM/GIS Automation API", version="1.0")
 
@@ -71,6 +73,16 @@ class GenerateResponse(BaseModel):
     job_id: str
 
 
+class SimplifyCadastreRequest(BaseModel):
+    municipality: str
+    source: Optional[str] = None
+    poum_mode: Optional[str] = None
+    output_path: Optional[str] = None
+    max_distance_m: Optional[float] = None
+    offset_distance_m: Optional[float] = None
+    angle_threshold_rad: Optional[float] = None
+
+
 @app.get("/municipalities")
 def get_municipalities() -> List[str]:
     """Return supported municipalities configured for this instance."""
@@ -88,6 +100,109 @@ def get_parcels(municipality: str) -> List[str]:
         raise HTTPException(status_code=500, detail=f"Failed to read POUM: {e}")
 
 
+def _load_backend_config() -> Dict[str, Any]:
+    config_path = Path(__file__).resolve().parent / "config.json"
+    if not config_path.exists():
+        return {}
+    try:
+        data = json.loads(config_path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def run_simplify_cadastre_job(
+    job: Job,
+    *,
+    source: str,
+    poum_mode: str,
+    output_path: Path,
+    max_distance: float,
+    offset_distance: float,
+    angle_threshold: float,
+) -> None:
+    """Execute simplify-cadastre preprocessing in background and update job state."""
+    job.status = "running"
+    job.started_at = time.time()
+    append_log(job, "SimplifyCadastre job started")
+
+    try:
+        append_log(job, f"source={source} | poum_mode={poum_mode}")
+        append_log(job, f"output={output_path}")
+
+        result = generate_simplified_cadastre_like_file(
+            poum_gml_path=str(POUM_GML_PATH),
+            output_file_path=str(output_path),
+            source=source,
+            poum_mode=poum_mode,
+            max_distance=max_distance,
+            offset_distance=offset_distance,
+            angle_threshold=angle_threshold,
+        )
+
+        output_file = result.get("output_file")
+        parcel_count = result.get("parcel_count")
+
+        if output_file:
+            job.files = [str(output_file)]
+
+        job.progress = 1.0
+        job.status = "success"
+        job.finished_at = time.time()
+        job.message = f"Done. Generated simplified file with {parcel_count} parcels."
+        append_log(job, job.message)
+
+    except Exception as e:
+        job.status = "error"
+        job.finished_at = time.time()
+        job.message = str(e)
+        append_log(job, f"ERROR: {str(e)}")
+
+
+@app.post("/preprocess/simplifycadastre", response_model=GenerateResponse)
+def post_simplify_cadastre(req: SimplifyCadastreRequest):
+    if req.municipality not in DEFAULT_MUNICIPALITIES:
+        raise HTTPException(status_code=400, detail="Unknown municipality")
+
+    cfg = _load_backend_config()
+
+    source = (req.source or cfg.get("simplify_source") or "both").strip().lower()
+    if source not in {"poum", "cadastre", "both"}:
+        raise HTTPException(status_code=400, detail="source must be one of: poum, cadastre, both")
+
+    poum_mode = (req.poum_mode or cfg.get("simplify_poum_mode") or "parcel").strip().lower()
+    if poum_mode not in {"parcel", "zone"}:
+        raise HTTPException(status_code=400, detail="poum_mode must be one of: parcel, zone")
+
+    output_path_cfg = req.output_path or cfg.get("simplify_output_path") or "outputs/parcels_simplified.json"
+    output_path = Path(output_path_cfg)
+    if not output_path.is_absolute():
+        output_path = Path(__file__).resolve().parent / output_path
+
+    max_distance = float(req.max_distance_m if req.max_distance_m is not None else cfg.get("street_max_distance_m", 30.0))
+    offset_distance = float(req.offset_distance_m if req.offset_distance_m is not None else cfg.get("street_offset_m", 0.1))
+    angle_threshold = float(req.angle_threshold_rad if req.angle_threshold_rad is not None else cfg.get("vertex_angle_threshold_rad", 0.1))
+
+    job = create_job(req.municipality, all_parcels=False, refcat=None)
+
+    t = threading.Thread(
+        target=run_simplify_cadastre_job,
+        kwargs={
+            "job": job,
+            "source": source,
+            "poum_mode": poum_mode,
+            "output_path": output_path,
+            "max_distance": max_distance,
+            "offset_distance": offset_distance,
+            "angle_threshold": angle_threshold,
+        },
+        daemon=True,
+    )
+    t.start()
+
+    return GenerateResponse(job_id=job.id)
+
+
 # -------- Batch tuning knobs --------
 # The following values throttle batch requests to avoid overloading WFS.
 CHUNK_SIZE = 20          # Number of parcels per batch
@@ -103,7 +218,10 @@ def _chunks(lst: List[str], n: int):
 
 
 def run_job(job: Job) -> None:
-    """Execute a job (single or batch) and update its state/logs in place."""
+    """Execute a job (single or batch) and update its state/logs in place.
+    
+    Loads parcels_simplified.json at the start to serve all generation requests.
+    """
     job.status = "running"
     job.started_at = time.time()
     append_log(job, "Job started")
@@ -111,11 +229,23 @@ def run_job(job: Job) -> None:
     try:
         municipality_slug = MUNICIPALITY_TO_SLUG.get(job.municipality, "municipality")
 
+        # Load preprocessed parcels data
+        parcels_json_path = Path(__file__).resolve().parent / "outputs" / "parcels_simplified.json"
+        if not parcels_json_path.exists():
+            raise RuntimeError(f"Preprocessed data not found: {parcels_json_path}. Run /preprocess/simplifycadastre first.")
+        
+        try:
+            with open(parcels_json_path, 'r', encoding='utf-8') as f:
+                parcels_data = json.load(f)
+            append_log(job, f"Loaded preprocessed data: {len(parcels_data)} parcels")
+        except Exception as e:
+            raise RuntimeError(f"Failed to load preprocessed data: {e}")
+
         # -------------------- ALL PARCELS (BATCH) --------------------
         if job.all_parcels:
-            refcats = list_refcats_from_poum(POUM_GML_PATH)
+            refcats = list(parcels_data.keys())
             total = max(len(refcats), 1)
-            append_log(job, f"Batch mode: {len(refcats)} parcels")
+            append_log(job, f"Batch mode: {len(refcats)} parcels from preprocessed data")
 
             produced_paths: List[str] = []
             fails = 0
@@ -130,9 +260,10 @@ def run_job(job: Job) -> None:
 
                         result = generate_one(
                             refcat=refcat,
-                            poum_gml_path=POUM_GML_PATH,
+                            parcels_data=parcels_data,
                             output_dir=OUTPUT_DIR,
                             municipality_slug=municipality_slug,
+                            poum_gml_path=str(POUM_GML_PATH),
                         )
 
                         # diagnostic log
@@ -175,9 +306,10 @@ def run_job(job: Job) -> None:
 
             result = generate_one(
                 refcat=job.refcat,
-                poum_gml_path=POUM_GML_PATH,
+                parcels_data=parcels_data,
                 output_dir=OUTPUT_DIR,
                 municipality_slug=municipality_slug,
+                poum_gml_path=str(POUM_GML_PATH),
             )
 
             # diagnostic log

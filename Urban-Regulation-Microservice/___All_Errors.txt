@@ -1,0 +1,15 @@
+CorrelationId: ddeebc34-b8f8-48f8-943f-680bb07d6bd0
+UTC DateTime: 02/17/2026 16:25:57
+
+The following files/folders have not been downloaded
+0. Urban-Regulation-Microservice/apps/__init__.py
+1. Urban-Regulation-Microservice/apps/IDSChecker/__init__.py
+2. Urban-Regulation-Microservice/apps/ParcelShapeChecker/__init__.py
+3. Urban-Regulation-Microservice/apps/Preprocessing/__init__.py
+4. Urban-Regulation-Microservice/apps/UrbanRegulationChecker/__init__.py
+5. Urban-Regulation-Microservice/config/__init__.py
+6. Urban-Regulation-Microservice/core/__init__.py
+7. Urban-Regulation-Microservice/core/constants/__init__.py
+8. Urban-Regulation-Microservice/core/middlewares/__init__.py
+9. Urban-Regulation-Microservice/core/migrations/__init__.py
+10. Urban-Regulation-Microservice/core/models/__init__.py

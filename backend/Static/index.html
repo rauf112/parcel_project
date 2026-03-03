@@ -13,8 +13,8 @@
     .card h2 { margin:0; padding: 14px 16px; border-bottom:1px solid var(--border); font-size: 16px; }
     .content { padding: 16px; }
     label { display:block; font-size: 13px; color: var(--muted); margin-bottom: 6px; }
-    select, button { width:100%; padding:10px 10px; border-radius: 8px; border:1px solid var(--border); font-size: 14px; background:#fff; }
-    select:disabled { background:#f3f4f6; color:#9ca3af; }
+    select, input, button, textarea { width:100%; padding:10px 10px; border-radius: 8px; border:1px solid var(--border); font-size: 14px; background:#fff; box-sizing: border-box; }
+    select:disabled, input:disabled, textarea:disabled { background:#f3f4f6; color:#9ca3af; }
     .row { margin-bottom: 14px; }
     .checkbox { display:flex; align-items:center; gap:10px; margin: 10px 0 14px; user-select:none; }
     .checkbox input { width:16px; height:16px; }
@@ -31,6 +31,7 @@
     .files a { color: var(--primary); text-decoration:none; }
     .files a:hover { text-decoration:underline; }
     .small { font-size:12px; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
   </style>
 </head>
 
@@ -99,6 +100,41 @@
         </div>
       </div>
     </div>
+
+    <div class="card" style="margin-top:16px;">
+      <h2>Volume Compliance Check (MVP)</h2>
+      <div class="content">
+        <div class="row">
+          <label for="checkArchitectIfcPath">Architect IFC path</label>
+          <input id="checkArchitectIfcPath" type="text" placeholder="outputs/architect.ifc" />
+          <div class="small muted" style="margin-top:6px;">Path is resolved by backend. Example: outputs/malgrat_000302300DG70H_23_envelope.ifc</div>
+        </div>
+
+        <div style="display:grid; grid-template-columns: 1fr 1fr; gap: 12px;">
+          <div class="row" style="margin-bottom:0;">
+            <label for="checkTolerance">Tolerance (m)</label>
+            <input id="checkTolerance" type="number" step="0.001" min="0" value="0.01" />
+          </div>
+          <div class="checkbox" style="margin: 24px 0 0;">
+            <input type="checkbox" id="checkKeepAllowedIfc" checked />
+            <div>
+              <div style="font-weight:600;">Keep allowed IFC</div>
+              <div class="small muted">If unchecked, temporary allowed IFC will be deleted after check.</div>
+            </div>
+          </div>
+        </div>
+
+        <button id="checkComplianceBtn" class="btn">Run Volume Compliance Check</button>
+        <div class="status" id="checkStatus"></div>
+
+        <div class="row" style="margin-top:12px;">
+          <div class="small muted" style="margin-bottom:6px;">Response preview</div>
+          <textarea id="checkResponse" class="mono" rows="14" readonly placeholder="Response will appear here..."></textarea>
+        </div>
+
+        <div class="small muted">MVP note: method may be <span class="mono">ground_floor_perimeter_temp_volume</span> or fallback <span class="mono">bbox</span>; both are approximate checks.</div>
+      </div>
+    </div>
   </div>
 
 <script>
@@ -114,6 +150,12 @@
   const filesEl = document.getElementById("files");
   const barEl = document.getElementById("bar");
   const progressTextEl = document.getElementById("progressText");
+  const checkArchitectIfcPathEl = document.getElementById("checkArchitectIfcPath");
+  const checkToleranceEl = document.getElementById("checkTolerance");
+  const checkKeepAllowedIfcEl = document.getElementById("checkKeepAllowedIfc");
+  const checkComplianceBtn = document.getElementById("checkComplianceBtn");
+  const checkStatusEl = document.getElementById("checkStatus");
+  const checkResponseEl = document.getElementById("checkResponse");
 
   let pollTimer = null;
   let currentJobId = null;
@@ -169,6 +211,19 @@
       ul.appendChild(li);
     }
     filesEl.appendChild(ul);
+  }
+
+  function setCheckStatus(msg, type="muted") {
+    checkStatusEl.className = "status " + (type === "ok" ? "ok" : type === "err" ? "err" : "muted");
+    checkStatusEl.textContent = msg || "";
+  }
+
+  function setCheckResponse(data) {
+    try {
+      checkResponseEl.value = typeof data === "string" ? data : JSON.stringify(data, null, 2);
+    } catch {
+      checkResponseEl.value = String(data ?? "");
+    }
   }
 
   function lockUI(isLocked) {
@@ -299,6 +354,59 @@
     }
   }
 
+  async function runVolumeComplianceCheck() {
+    const municipality = municipalityEl.value;
+    const refcat = refcatEl.value;
+    const architectPath = (checkArchitectIfcPathEl.value || "").trim();
+    const tolRaw = (checkToleranceEl.value || "0.01").trim();
+    const tolerance = Number(tolRaw);
+
+    if (!municipality) {
+      setCheckStatus("Select municipality first.", "err");
+      return;
+    }
+    if (!refcat) {
+      setCheckStatus("Select a cadastral reference (refcat).", "err");
+      return;
+    }
+    if (!architectPath) {
+      setCheckStatus("architect_ifc_path is required.", "err");
+      return;
+    }
+    if (!Number.isFinite(tolerance) || tolerance < 0) {
+      setCheckStatus("Tolerance must be a number >= 0.", "err");
+      return;
+    }
+
+    const body = {
+      municipality,
+      refcat,
+      architect_ifc_path: architectPath,
+      tolerance_m: tolerance,
+      keep_allowed_ifc: !!checkKeepAllowedIfcEl.checked,
+    };
+
+    checkComplianceBtn.disabled = true;
+    setCheckStatus("Running compliance check...");
+    setCheckResponse("{}");
+
+    try {
+      const res = await apiPost("/check/volume-compliance", body);
+      const method = res?.method || "unknown";
+      const compliant = res?.compliant === true;
+      setCheckStatus(`Done: ${compliant ? "COMPLIANT" : "NON-COMPLIANT"} | method=${method}`, compliant ? "ok" : "err");
+      setCheckResponse(res);
+    } catch (e) {
+      let parsed = null;
+      try { parsed = e?.text ? JSON.parse(e.text) : null; } catch {}
+      const detail = parsed?.detail || `Request failed (status ${e?.status ?? "?"})`;
+      setCheckStatus(detail, "err");
+      setCheckResponse(parsed || (e?.text || String(e)));
+    } finally {
+      checkComplianceBtn.disabled = false;
+    }
+  }
+
   function beginPolling(jobId) {
     if (pollTimer) clearInterval(pollTimer);
 
@@ -384,6 +492,7 @@
   });
 
   generateBtn.addEventListener("click", startGenerate);
+  checkComplianceBtn.addEventListener("click", runVolumeComplianceCheck);
 
   // init
   (async function init() {
@@ -394,6 +503,8 @@
     setLogs([]);
     setFiles([]);
     generateBtn.disabled = true;
+    checkArchitectIfcPathEl.value = "outputs/malgrat_000302300DG70H_23_envelope.ifc";
+    setCheckResponse("{}");
   })();
 </script>
 </body>

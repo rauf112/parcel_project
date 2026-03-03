@@ -16,10 +16,12 @@ Notes
 
 from __future__ import annotations
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
 from pathlib import Path
@@ -34,6 +36,17 @@ from simplify_cadastre_like import generate_simplified_cadastre_like_file
 from volume_compliance import run_volume_compliance_check
 
 app = FastAPI(title="Parcel BIM/GIS Automation API", version="1.0")
+
+
+@app.exception_handler(RequestValidationError)
+async def request_validation_exception_handler(request: Request, exc: RequestValidationError):
+    return JSONResponse(
+        status_code=400,
+        content={
+            "detail": "Invalid request body or query parameters.",
+            "errors": exc.errors(),
+        },
+    )
 
 # --- Serve UI from / (backend/static/index.html) ---
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -270,6 +283,10 @@ def post_volume_compliance(req: VolumeComplianceRequest) -> Dict[str, Any]:
     if not architect_ifc_path:
         raise HTTPException(status_code=400, detail="architect_ifc_path is required")
 
+    architect_path = Path(architect_ifc_path).expanduser().resolve()
+    if not architect_path.exists():
+        raise HTTPException(status_code=404, detail=f"Architect IFC file not found: {architect_path}")
+
     tolerance = float(req.tolerance_m if req.tolerance_m is not None else 0.01)
     if tolerance < 0:
         raise HTTPException(status_code=400, detail="tolerance_m must be >= 0")
@@ -278,14 +295,16 @@ def post_volume_compliance(req: VolumeComplianceRequest) -> Dict[str, Any]:
         return run_volume_compliance_check(
             municipality=req.municipality,
             refcat=refcat,
-            architect_ifc_path=architect_ifc_path,
+            architect_ifc_path=str(architect_path),
             tolerance_m=tolerance,
             keep_allowed_ifc=bool(req.keep_allowed_ifc),
         )
     except FileNotFoundError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+        raise HTTPException(status_code=404, detail=f"IFC file not found: {e}")
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=f"Invalid volume compliance input: {e}")
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=f"Volume compliance processing failed: {e}")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Volume compliance check failed: {e}")
 

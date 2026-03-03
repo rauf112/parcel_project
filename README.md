@@ -22,6 +22,8 @@ Behavior notes:
 
 Endpoint: `POST /check/volume-compliance`
 
+> MVP notu: Varsayılan kontrol, mimari IFC'den zemin kat perimetresi çıkarılarak geçici hacim üretir (`method=ground_floor_perimeter_temp_volume`). Eğer bu çıkarım başarısız olursa `bbox` fallback kullanılır. Her iki yaklaşım da yaklaşık sonuç verir; kesin katı-geometri (solid boolean) analizi yapılmaz.
+
 Request body:
 
 ```json
@@ -34,9 +36,51 @@ Request body:
 }
 ```
 
-Response highlights:
-- `compliant`: `true/false`
-- `overflow_by_side_m`: taşma mesafesi (`west/east/south/north/down/up`)
-- `volumes.outside_bbox_m3`: izinli hacim dışına taşan yaklaşık hacim (bbox yaklaşımı)
-- `allowed_bbox` ve `project_bbox`: karşılaştırmada kullanılan kutu ölçüleri
+Response (MVP, standardized):
+
+```json
+{
+  "compliant": true,
+  "overflow_by_side_m": {
+    "west": 0.0,
+    "east": 0.0,
+    "south": 0.0,
+    "north": 0.0,
+    "down": 0.0,
+    "up": 0.0
+  },
+  "volumes": {
+    "project": 1234.56,
+    "intersection": 1234.56,
+    "outside": 0.0
+  },
+  "method": "ground_floor_perimeter_temp_volume",
+  "warnings": [
+    "MVP bbox method: this is an approximate geometric compliance result."
+  ],
+  "tolerance": {
+    "value_m": 0.01,
+    "rule": "A side is considered non-compliant when overflow_by_side_m[side] > tolerance.value_m.",
+    "overflow_exceeds_tolerance_by_side": {
+      "west": false,
+      "east": false,
+      "south": false,
+      "north": false,
+      "down": false,
+      "up": false
+    },
+    "max_overflow_m": 0.0
+  },
+  "sources": {
+    "allowed_ifc": "...",
+    "architect_ifc": "...",
+    "keep_allowed_ifc": true
+  }
+}
+```
+
+Error semantics:
+- `400`: invalid input / validation error
+- `404`: file not found (ör. `architect_ifc_path`)
+- `500`: internal processing error
 

@@ -50,31 +50,61 @@
       "type": "number",
       "description": "Max roof rise (meters) for roof geometry generation."
     },
+    "preprocess_source": {
+      "type": "string",
+      "enum": ["poum", "cadastre", "both"],
+      "description": "Geometry source for preprocess simplify-cadastre output generation."
+    },
+    "preprocess_poum_mode": {
+      "type": "string",
+      "enum": ["parcel", "zone"],
+      "description": "POUM matching mode used during preprocess simplified data generation."
+    },
+    "preprocess_output_path": {
+      "type": "string",
+      "description": "Output JSON path for preprocess simplified cadastre-like file."
+    },
+    "preprocess_street_max_distance_m": {
+      "type": "number",
+      "description": "Maximum street-search ray distance in meters."
+    },
+    "preprocess_street_offset_m": {
+      "type": "number",
+      "description": "Offset from segment midpoint before casting street-search ray."
+    },
+    "preprocess_vertex_angle_threshold_rad": {
+      "type": "number",
+      "description": "Vertex filtering angle threshold in radians."
+    },
+    "generate_use_preprocess_geometry": {
+      "type": "boolean",
+      "description": "If true, generate reads parcel geometry and street metadata from preprocess output JSON when available."
+    },
     "simplify_source": {
       "type": "string",
       "enum": ["poum", "cadastre", "both"],
-      "description": "Geometry source for SimplifyCadastre-like output generation."
+      "description": "Deprecated legacy key. Use preprocess_source."
     },
     "simplify_poum_mode": {
       "type": "string",
       "enum": ["parcel", "zone"],
-      "description": "POUM matching mode used during simplified data generation."
+      "description": "Deprecated legacy key. Use preprocess_poum_mode."
     },
     "simplify_output_path": {
       "type": "string",
-      "description": "Output JSON path for simplified cadastre-like file."
+      "description": "Deprecated legacy key. Use preprocess_output_path."
     },
     "street_max_distance_m": {
       "type": "number",
-      "description": "Maximum street-search ray distance in meters."
+      "description": "Deprecated legacy key. Use preprocess_street_max_distance_m."
     },
     "street_offset_m": {
       "type": "number",
-      "description": "Offset from segment midpoint before casting street-search ray."
+      "description": "Deprecated legacy key. Use preprocess_street_offset_m."
     },
     "vertex_angle_threshold_rad": {
       "type": "number",
-      "description": "Vertex filtering angle threshold in radians."
+      "description": "Deprecated legacy key. Use preprocess_vertex_angle_threshold_rad."
     }
   },
   "required": [
@@ -89,11 +119,12 @@
     "poum_simplify_method",
     "poum_zone_intersection",
     "roof_rise_max_m",
-    "simplify_source",
-    "simplify_poum_mode",
-    "simplify_output_path",
-    "street_max_distance_m",
-    "street_offset_m",
-    "vertex_angle_threshold_rad"
+    "preprocess_source",
+    "preprocess_poum_mode",
+    "preprocess_output_path",
+    "preprocess_street_max_distance_m",
+    "preprocess_street_offset_m",
+    "preprocess_vertex_angle_threshold_rad",
+    "generate_use_preprocess_geometry"
   ]
 }

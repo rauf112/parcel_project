@@ -18,3 +18,25 @@ You can control how polygons are sourced and depth defaults via `backend/config.
 Behavior notes:
 - When POUM returns a zoning polygon (multi-RC) and `poum_mode=zone`, the pipeline attempts a best-effort intersection of the CADASTRE parcel polygon with the POUM zone polygon to obtain a parcel-level footprint. If that fails, the CADASTRE parcel is used as a fallback. This keeps POUM as preferred source but avoids using an oversized zone polygon as a parcel footprint.
 
+## Volume compliance check
+
+Endpoint: `POST /check/volume-compliance`
+
+Request body:
+
+```json
+{
+  "municipality": "Malgrat de Mar",
+  "refcat": "8808517DG7180N",
+  "architect_ifc_path": "backend/outputs/architect.ifc",
+  "tolerance_m": 0.01,
+  "keep_allowed_ifc": true
+}
+```
+
+Response highlights:
+- `compliant`: `true/false`
+- `overflow_by_side_m`: taşma mesafesi (`west/east/south/north/down/up`)
+- `volumes.outside_bbox_m3`: izinli hacim dışına taşan yaklaşık hacim (bbox yaklaşımı)
+- `allowed_bbox` ve `project_bbox`: karşılaştırmada kullanılan kutu ölçüleri
+

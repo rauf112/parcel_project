@@ -31,6 +31,7 @@ from config import POUM_GML_PATH, OUTPUT_DIR, DEFAULT_MUNICIPALITIES
 from jobs import create_job, get_job, append_log, Job
 from pipeline import list_refcats_from_poum, generate_one
 from simplify_cadastre_like import generate_simplified_cadastre_like_file
+from volume_compliance import run_volume_compliance_check
 
 app = FastAPI(title="Parcel BIM/GIS Automation API", version="1.0")
 
@@ -75,12 +76,27 @@ class GenerateResponse(BaseModel):
 
 class SimplifyCadastreRequest(BaseModel):
     municipality: str
+    preprocess_source: Optional[str] = None
+    preprocess_poum_mode: Optional[str] = None
+    preprocess_output_path: Optional[str] = None
+    preprocess_street_max_distance_m: Optional[float] = None
+    preprocess_street_offset_m: Optional[float] = None
+    preprocess_vertex_angle_threshold_rad: Optional[float] = None
+
     source: Optional[str] = None
     poum_mode: Optional[str] = None
     output_path: Optional[str] = None
     max_distance_m: Optional[float] = None
     offset_distance_m: Optional[float] = None
     angle_threshold_rad: Optional[float] = None
+
+
+class VolumeComplianceRequest(BaseModel):
+    municipality: str
+    refcat: str
+    architect_ifc_path: str
+    tolerance_m: Optional[float] = 0.01
+    keep_allowed_ifc: Optional[bool] = True
 
 
 @app.get("/municipalities")
@@ -142,6 +158,7 @@ def run_simplify_cadastre_job(
 
         output_file = result.get("output_file")
         parcel_count = result.get("parcel_count")
+        street_engine_used = result.get("street_engine_used")
 
         if output_file:
             job.files = [str(output_file)]
@@ -151,6 +168,8 @@ def run_simplify_cadastre_job(
         job.finished_at = time.time()
         job.message = f"Done. Generated simplified file with {parcel_count} parcels."
         append_log(job, job.message)
+        if street_engine_used:
+            append_log(job, f"street_engine_used={street_engine_used}")
 
     except Exception as e:
         job.status = "error"
@@ -166,23 +185,58 @@ def post_simplify_cadastre(req: SimplifyCadastreRequest):
 
     cfg = _load_backend_config()
 
-    source = (req.source or cfg.get("simplify_source") or "both").strip().lower()
+    def _cfg_first(*keys: str, default: Any = None) -> Any:
+        for key in keys:
+            if key in cfg and cfg.get(key) is not None:
+                return cfg.get(key)
+        return default
+
+    source = (
+        (req.preprocess_source if req.preprocess_source is not None else None)
+        or (req.source if req.source is not None else None)
+        or _cfg_first("preprocess_source", "simplify_source", default="both")
+    ).strip().lower()
     if source not in {"poum", "cadastre", "both"}:
         raise HTTPException(status_code=400, detail="source must be one of: poum, cadastre, both")
 
-    poum_mode = (req.poum_mode or cfg.get("simplify_poum_mode") or "parcel").strip().lower()
+    poum_mode = (
+        (req.preprocess_poum_mode if req.preprocess_poum_mode is not None else None)
+        or (req.poum_mode if req.poum_mode is not None else None)
+        or _cfg_first("preprocess_poum_mode", "simplify_poum_mode", default="parcel")
+    ).strip().lower()
     if poum_mode not in {"parcel", "zone"}:
         raise HTTPException(status_code=400, detail="poum_mode must be one of: parcel, zone")
 
-    output_path_cfg = req.output_path or cfg.get("simplify_output_path") or "outputs/parcels_simplified.json"
+    output_path_cfg = (
+        (req.preprocess_output_path if req.preprocess_output_path is not None else None)
+        or (req.output_path if req.output_path is not None else None)
+        or _cfg_first("preprocess_output_path", "simplify_output_path", default="outputs/parcels_simplified.json")
+    )
     output_path = Path(output_path_cfg)
     if not output_path.is_absolute():
         output_path = Path(__file__).resolve().parent / output_path
 
-    max_distance = float(req.max_distance_m if req.max_distance_m is not None else cfg.get("street_max_distance_m", 30.0))
-    offset_distance = float(req.offset_distance_m if req.offset_distance_m is not None else cfg.get("street_offset_m", 0.1))
-    angle_threshold = float(req.angle_threshold_rad if req.angle_threshold_rad is not None else cfg.get("vertex_angle_threshold_rad", 0.1))
-
+    max_distance = float(
+        req.preprocess_street_max_distance_m
+        if req.preprocess_street_max_distance_m is not None
+        else req.max_distance_m
+        if req.max_distance_m is not None
+        else _cfg_first("preprocess_street_max_distance_m", "street_max_distance_m", default=30.0)
+    )
+    offset_distance = float(
+        req.preprocess_street_offset_m
+        if req.preprocess_street_offset_m is not None
+        else req.offset_distance_m
+        if req.offset_distance_m is not None
+        else _cfg_first("preprocess_street_offset_m", "street_offset_m", default=0.1)
+    )
+    angle_threshold = float(
+        req.preprocess_vertex_angle_threshold_rad
+        if req.preprocess_vertex_angle_threshold_rad is not None
+        else req.angle_threshold_rad
+        if req.angle_threshold_rad is not None
+        else _cfg_first("preprocess_vertex_angle_threshold_rad", "vertex_angle_threshold_rad", default=0.1)
+    )
     job = create_job(req.municipality, all_parcels=False, refcat=None)
 
     t = threading.Thread(
@@ -203,6 +257,39 @@ def post_simplify_cadastre(req: SimplifyCadastreRequest):
     return GenerateResponse(job_id=job.id)
 
 
+@app.post("/check/volume-compliance")
+def post_volume_compliance(req: VolumeComplianceRequest) -> Dict[str, Any]:
+    if req.municipality not in DEFAULT_MUNICIPALITIES:
+        raise HTTPException(status_code=400, detail="Unknown municipality")
+
+    refcat = (req.refcat or "").strip()
+    if not refcat:
+        raise HTTPException(status_code=400, detail="refcat is required")
+
+    architect_ifc_path = (req.architect_ifc_path or "").strip()
+    if not architect_ifc_path:
+        raise HTTPException(status_code=400, detail="architect_ifc_path is required")
+
+    tolerance = float(req.tolerance_m if req.tolerance_m is not None else 0.01)
+    if tolerance < 0:
+        raise HTTPException(status_code=400, detail="tolerance_m must be >= 0")
+
+    try:
+        return run_volume_compliance_check(
+            municipality=req.municipality,
+            refcat=refcat,
+            architect_ifc_path=architect_ifc_path,
+            tolerance_m=tolerance,
+            keep_allowed_ifc=bool(req.keep_allowed_ifc),
+        )
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Volume compliance check failed: {e}")
+
+
 # -------- Batch tuning knobs --------
 # The following values throttle batch requests to avoid overloading WFS.
 CHUNK_SIZE = 20          # Number of parcels per batch
@@ -218,10 +305,7 @@ def _chunks(lst: List[str], n: int):
 
 
 def run_job(job: Job) -> None:
-    """Execute a job (single or batch) and update its state/logs in place.
-    
-    Loads parcels_simplified.json at the start to serve all generation requests.
-    """
+    """Execute a job (single or batch) and update its state/logs in place."""
     job.status = "running"
     job.started_at = time.time()
     append_log(job, "Job started")
@@ -229,23 +313,16 @@ def run_job(job: Job) -> None:
     try:
         municipality_slug = MUNICIPALITY_TO_SLUG.get(job.municipality, "municipality")
 
-        # Load preprocessed parcels data
-        parcels_json_path = Path(__file__).resolve().parent / "outputs" / "parcels_simplified.json"
-        if not parcels_json_path.exists():
-            raise RuntimeError(f"Preprocessed data not found: {parcels_json_path}. Run /preprocess/simplifycadastre first.")
-        
-        try:
-            with open(parcels_json_path, 'r', encoding='utf-8') as f:
-                parcels_data = json.load(f)
-            append_log(job, f"Loaded preprocessed data: {len(parcels_data)} parcels")
-        except Exception as e:
-            raise RuntimeError(f"Failed to load preprocessed data: {e}")
-
         # -------------------- ALL PARCELS (BATCH) --------------------
         if job.all_parcels:
-            refcats = list(parcels_data.keys())
+            refcats = list_refcats_from_poum(POUM_GML_PATH)
             total = max(len(refcats), 1)
-            append_log(job, f"Batch mode: {len(refcats)} parcels from preprocessed data")
+            append_log(job, f"Batch mode: {len(refcats)} parcels")
+            job.meta = {
+                "mode": "batch",
+                "preprocess_geometry_used_count": 0,
+                "preprocess_geometry_source_files": [],
+            }
 
             produced_paths: List[str] = []
             fails = 0
@@ -260,14 +337,21 @@ def run_job(job: Job) -> None:
 
                         result = generate_one(
                             refcat=refcat,
-                            parcels_data=parcels_data,
+                            poum_gml_path=POUM_GML_PATH,
                             output_dir=OUTPUT_DIR,
                             municipality_slug=municipality_slug,
-                            poum_gml_path=str(POUM_GML_PATH),
                         )
 
                         # diagnostic log
                         append_log(job, f"Zone={result.get('zone')} | rule_sources={result.get('rule_sources')}")
+
+                        if result.get("used_preprocess_geometry"):
+                            job.meta["preprocess_geometry_used_count"] = int(job.meta.get("preprocess_geometry_used_count", 0)) + 1
+                            src = result.get("preprocess_source_file")
+                            if src:
+                                existing = set(job.meta.get("preprocess_geometry_source_files", []))
+                                existing.add(str(src))
+                                job.meta["preprocess_geometry_source_files"] = sorted(existing)
 
                         if not result.get("skipped") and result.get("ifc_path"):
                             produced_paths.append(result["ifc_path"])
@@ -306,14 +390,18 @@ def run_job(job: Job) -> None:
 
             result = generate_one(
                 refcat=job.refcat,
-                parcels_data=parcels_data,
+                poum_gml_path=POUM_GML_PATH,
                 output_dir=OUTPUT_DIR,
                 municipality_slug=municipality_slug,
-                poum_gml_path=str(POUM_GML_PATH),
             )
 
             # diagnostic log
             append_log(job, f"Zone={result.get('zone')} | rule_sources={result.get('rule_sources')}")
+            job.meta = {
+                "mode": "single",
+                "used_preprocess_geometry": bool(result.get("used_preprocess_geometry")),
+                "preprocess_source_file": result.get("preprocess_source_file"),
+            }
 
             if result.get("skipped"):
                 job.files = []
@@ -383,6 +471,7 @@ def get_job_status(job_id: str) -> Dict[str, Any]:
         "status": job.status,
         "progress": job.progress,
         "message": job.message,
+        "meta": job.meta,
         "logs": job.logs[-500:],
         "files": downloadable,
     }

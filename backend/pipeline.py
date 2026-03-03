@@ -83,6 +83,7 @@ def _load_config() -> dict:
       - poum_simplify_zone: bool
       - poum_simplify_method: string
       - roof_rise_max_m: float
+            - generate_use_preprocess_geometry: bool
     """
     # Base: code defaults
     defaults = {
@@ -97,6 +98,7 @@ def _load_config() -> dict:
         "poum_simplify_method": "convex_hull",
         "roof_rise_max_m": 10.0,
         "poum_zone_intersection": True,
+        "generate_use_preprocess_geometry": False,
     }
 
     # Merge backend/config.json (if exists)
@@ -253,82 +255,226 @@ def _polygon_area(points_xy: List[Tuple[float, float]]) -> float:
     return abs(0.5 * a)
 
 
+def _resolve_preprocess_output_path(config: Dict[str, Any]) -> Optional[Path]:
+    raw = config.get("preprocess_output_path") or config.get("simplify_output_path")
+    if not raw:
+        return None
+    p = Path(str(raw))
+    if not p.is_absolute():
+        p = Path(__file__).resolve().parent / p
+    return p
+
+
+def _load_preprocessed_parcel_geometry(refcat: str, config: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    p = _resolve_preprocess_output_path(config)
+    if p is None or not p.exists():
+        return None
+
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+    if not isinstance(data, dict):
+        return None
+
+    parcel = data.get(refcat)
+    if not isinstance(parcel, dict):
+        return None
+
+    raw_points = parcel.get("points")
+    if not isinstance(raw_points, list):
+        return None
+
+    points: List[Tuple[float, float]] = []
+    for point in raw_points:
+        if isinstance(point, (list, tuple)) and len(point) >= 2:
+            try:
+                points.append((float(point[0]), float(point[1])))
+            except Exception:
+                continue
+
+    if len(points) < 3:
+        return None
+
+    segments = parcel.get("segments")
+    segment_count = len(segments) if isinstance(segments, list) else 0
+    street_values: List[float] = []
+    if isinstance(segments, list):
+        for seg in segments:
+            if not isinstance(seg, dict):
+                continue
+            if "street" not in seg:
+                continue
+            try:
+                street_values.append(float(seg.get("street")))
+            except Exception:
+                continue
+
+    street_metrics: Dict[str, Any] = {
+        "source": "urban_microservice_preprocess",
+        "segment_count": segment_count,
+        "street_segment_count": len(street_values),
+    }
+    if street_values:
+        street_metrics.update(
+            {
+                "street_min_m": float(min(street_values)),
+                "street_max_m": float(max(street_values)),
+                "street_avg_m": float(sum(street_values) / len(street_values)),
+            }
+        )
+
+    return {
+        "points": _ensure_closed(points),
+        "street_metrics": street_metrics,
+        "source_file": str(p),
+    }
+
+
 def generate_one(
     refcat: str,
-    parcels_data: Dict[str, Any],
+    poum_gml_path: str,
     output_dir: str | Path,
     municipality_slug: str = "malgrat",
-    poum_gml_path: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
-    Generate a single parcel envelope from preprocessed parcels_simplified.json:
-    Parcel points (WGS84) → project to UTM → POUM zone → rules → IFC
-    
-    Parameters:
-    -----------
-    refcat : str
-        Parcel reference (e.g., "000302300DG70H")
-    parcels_data : Dict[str, Any]
-        Preprocessed data from parcels_simplified.json.
-        Structure: {refcat: {id, points: [[lon,lat],...], segments: [...]}}
-    output_dir : str | Path
-        Where to write IFC files
-    municipality_slug : str
-        Prefix for output filenames
-    poum_gml_path : Optional[str]
-        POUM GML file (needed for zone/ALTMAX/PROFEDIF lookups only)
+    Generate a single parcel envelope:
+    WFS/POUM polygon → POUM zone → rules (regulations/POUM/default) → IFC
     """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # 1) Try to get parcel data from JSON first
-    xy = None
+    idx = _get_poum_index(poum_gml_path)
+    poum_info = idx.get(refcat)
+
+    zone = (poum_info.zone if poum_info else None) or "UNKNOWN"
+
     config = _load_config()
-    
-    if refcat in parcels_data:
-        # Use preprocessed points from JSON (already in UTM)
-        parcel_entry = parcels_data[refcat]
-        points = parcel_entry.get("points", [])
-        
-        if points:
-            # JSON points are in EPSG:25831 (UTM) already, just convert to tuples
-            xy = [tuple(p) if isinstance(p, (list, tuple)) else p for p in points]
+    xy = None
+    street_metrics: Optional[Dict[str, Any]] = None
+    used_preprocess_geometry = False
+    preprocess_source_file: Optional[str] = None
+
+    if config.get("generate_use_preprocess_geometry", False):
+        pre = _load_preprocessed_parcel_geometry(refcat, config)
+        if pre is not None:
+            xy = pre["points"]
+            street_metrics = pre.get("street_metrics")
+            used_preprocess_geometry = True
+            preprocess_source_file = pre.get("source_file")
             if config.get("debug_depth_log"):
-                print(f"[SRC] Using preprocessed UTM points for {refcat} ({len(xy)} vertices)")
-    
-    # 2) Fallback to cadastre WFS if not in JSON
-    if xy is None and refcat not in parcels_data:
+                print(f"[SRC] Using preprocess geometry for {refcat} from {pre.get('source_file')}")
+
+    # 1) Attempt to obtain polygon according to config: POUM, Cadastre or both
+    polygon_source = config.get("polygon_source", "both")
+
+    if xy is None and polygon_source in ("poum", "both"):
+        # Try to get polygon from POUM.gml (already in EPSG:25831)
+        from poum_index import get_polygon_by_refcat
+
+        poum_mode = config.get("poum_mode", "parcel")  # 'parcel' or 'zone'
+        strict = True if poum_mode == "parcel" else False
+
+        poum_poly = get_polygon_by_refcat(poum_gml_path, refcat, strict=strict)
+        if poum_poly:
+            # If strict (parcel), it's exact
+            if strict:
+                xy = poum_poly
+                if config.get("debug_depth_log"):
+                    print(f"[SRC] Using POUM polygon for {refcat} (mode={poum_mode})")
+            else:
+                # Non-strict: simplify zone polygons, compare areas, and intersect with cadastre
+                try:
+                    # Optional: simplify POUM zone to reduce concavity
+                    poum_poly_use = poum_poly
+                    if config.get("poum_simplify_zone") and config.get("poum_simplify_method", "convex_hull") == "convex_hull":
+                        from ifc_exporter import convex_hull
+                        try:
+                            simplified = convex_hull(poum_poly)
+                            poum_poly_use = simplified
+                            if config.get("debug_depth_log"):
+                                print(f"[SRC] Simplified POUM zone polygon for {refcat}: {len(poum_poly)} -> {len(simplified)} pts")
+                        except Exception:
+                            # Fallback to original if simplification fails
+                            poum_poly_use = poum_poly
+
+                    lonlat = get_parcel_polygon_by_local_id(refcat)
+                    cad_xy = _transform_wgs84_to_utm(lonlat)
+                    cad_xy = _ensure_closed(cad_xy)
+
+                    # Area checks to avoid using very large zone polygons
+                    a_cad = _polygon_area(cad_xy)
+                    a_poum = _polygon_area(poum_poly_use)
+                    threshold = float(config.get("poum_zone_area_ratio_threshold", 3.0))
+
+                    # If intersection is disabled by config, choose behavior:
+                    # - Prefer CADASTRE if polygon_source includes it; otherwise use raw POUM zone
+                    if not config.get("poum_zone_intersection", True):
+                        if polygon_source in ("cadastre", "both"):
+                            xy = cad_xy
+                            if config.get("debug_depth_log"):
+                                print(f"[SRC] POUM zone intersection disabled for {refcat}; using CADASTRE parcel")
+                        else:
+                            xy = poum_poly_use
+                            if config.get("debug_depth_log"):
+                                print(f"[SRC] POUM zone intersection disabled for {refcat}; using POUM zone polygon")
+
+                    else:
+                        if a_cad > 0 and (a_poum / a_cad) > threshold:
+                            xy = cad_xy
+                            if config.get("debug_depth_log"):
+                                print(f"[SRC] POUM zone too large for {refcat} (area_ratio={a_poum/a_cad:.1f} > {threshold}); using CADASTRE parcel")
+                        else:
+                            from ifc_exporter import polygon_intersection
+                            inter = polygon_intersection(cad_xy, poum_poly_use)
+                            if inter is not None:
+                                xy = inter
+                                if config.get("debug_depth_log"):
+                                    print(f"[SRC] Using POUM (zone) intersected with CADASTRE for {refcat}")
+                            else:
+                                xy = cad_xy
+                                if config.get("debug_depth_log"):
+                                    print(f"[SRC] POUM provided zone for {refcat} but intersection failed; using CADASTRE parcel")
+                except Exception as e:
+                    # Cadastre fetch failed; if in 'both' mode, fall back to POUM polygon
+                    if polygon_source == "both":
+                        xy = poum_poly_use
+                        if config.get("debug_depth_log"):
+                            print(f"[SRC] POUM polygon used for {refcat} (cadastre fetch failed: {e})")
+                    else:
+                        raise
+        else:
+            # If strict and not found, check if a non-strict POUM feature exists
+            if strict:
+                maybe = get_polygon_by_refcat(poum_gml_path, refcat, strict=False)
+                if maybe is not None and config.get("debug_depth_log"):
+                    print(f"[SRC] POUM has a feature containing {refcat}, but it's a grouped/zone feature; falling back")
+            if polygon_source == "poum":
+                raise RuntimeError(f"Parcel {refcat} not found in POUM.gml (mode={poum_mode}) and polygon_source=poum")
+
+    if xy is None and polygon_source in ("cadastre", "both"):
+        # Fallback to cadastre WFS
         try:
             lonlat = get_parcel_polygon_by_local_id(refcat)
-            xy = _transform_wgs84_to_utm(lonlat)
-            if config.get("debug_depth_log"):
-                print(f"[SRC] Fallback: Using CADASTRE WFS polygon for {refcat}")
         except Exception as e:
             msg = str(e)
+            # WFS maintenance / HTML responses
             if "<html" in msg.lower() or "text/html" in msg.lower():
                 raise RuntimeError("Service unavailable (WFS returned HTML / maintenance).") from e
-            raise RuntimeError(f"Parcel {refcat} not found in preprocessed data or cadastre WFS: {e}") from e
-    
-    if xy is None:
-        raise RuntimeError(f"Could not obtain polygon for parcel {refcat}")
-    
+            raise
+
+        # 2) Project to meters
+        xy = _transform_wgs84_to_utm(lonlat)
+        if config.get("debug_depth_log"):
+            print(f"[SRC] Using CADASTRE WFS polygon for {refcat}")
+
+    if not xy:
+        raise RuntimeError(f"Parcel {refcat} not found in POUM.gml nor in cadastre WFS")
+
     xy = _ensure_closed(xy)
 
-    # 3) Get zone info from POUM (if available)
-    zone = "UNKNOWN"
-    poum_info = None
-    
-    if poum_gml_path:
-        try:
-            idx = _get_poum_index(poum_gml_path)
-            poum_info = idx.get(refcat)
-            if poum_info:
-                zone = poum_info.zone
-        except Exception as e:
-            if config.get("debug_depth_log"):
-                print(f"[WARN] Could not load POUM zone for {refcat}: {e}")
-
-    # 4) Rules
+    # 3) Rules
     height_m, depth_m, rule_sources = _pick_height_and_depth(zone, poum_info)
 
     # If a default depth is configured, apply it as fallback; if force_depth_m is True,
@@ -373,6 +519,7 @@ def generate_one(
         ground_height=ground_h,
         depth_m=depth_m,
         max_roof_rise_m=config.get("roof_rise_max_m"),
+        street_metrics=street_metrics,
     )
 
     # 6) Normalize (in case exporter writes to a subfolder)
@@ -383,6 +530,8 @@ def generate_one(
         "zone": zone,
         "ifc_path": final_path,
         "rule_sources": rule_sources,
+        "used_preprocess_geometry": used_preprocess_geometry,
+        "preprocess_source_file": preprocess_source_file,
         "skipped": False,
     }
 

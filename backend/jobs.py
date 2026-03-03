@@ -15,7 +15,7 @@ Notes
 
 from __future__ import annotations
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Any
 import time
 import uuid
 
@@ -49,6 +49,7 @@ class Job:
     finished_at: Optional[float] = None
     files: List[str] = field(default_factory=list)   # absolute paths
     logs: List[str] = field(default_factory=list)
+    meta: Dict[str, Any] = field(default_factory=dict)
 
 JOBS: Dict[str, Job] = {}
 

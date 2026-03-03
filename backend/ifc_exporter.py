@@ -26,7 +26,7 @@ Cadastral coordinates (UTM) can be very large. To reduce precision issues in IFC
 """
 
 import math
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Dict, Any
 
 import ifcopenshell
 import ifcopenshell.guid
@@ -458,6 +458,63 @@ def _add_pset_roof_slopes(model, element, real_deg: Optional[float], virtual_deg
     )
 
 
+def _add_pset_street_metrics(model, element, street_metrics: Optional[Dict[str, Any]]):
+    if not street_metrics or not isinstance(street_metrics, dict):
+        return
+
+    props = []
+
+    source = street_metrics.get("source")
+    if source is not None:
+        props.append(
+            model.create_entity(
+                "IfcPropertySingleValue",
+                Name="Source",
+                NominalValue=model.create_entity("IfcLabel", str(source)),
+                Unit=None,
+            )
+        )
+
+    for name, key in [
+        ("SegmentCount", "segment_count"),
+        ("StreetSegmentCount", "street_segment_count"),
+        ("StreetMinM", "street_min_m"),
+        ("StreetMaxM", "street_max_m"),
+        ("StreetAvgM", "street_avg_m"),
+    ]:
+        if key not in street_metrics:
+            continue
+        try:
+            value = float(street_metrics.get(key))
+        except Exception:
+            continue
+        props.append(
+            model.create_entity(
+                "IfcPropertySingleValue",
+                Name=name,
+                NominalValue=model.create_entity("IfcReal", value),
+                Unit=None,
+            )
+        )
+
+    if not props:
+        return
+
+    pset = model.create_entity(
+        "IfcPropertySet",
+        GlobalId=_new_guid(),
+        Name="Pset_PreprocessStreetMetrics",
+        HasProperties=props,
+    )
+
+    model.create_entity(
+        "IfcRelDefinesByProperties",
+        GlobalId=_new_guid(),
+        RelatedObjects=[element],
+        RelatingPropertyDefinition=pset,
+    )
+
+
 # =============================================================================
 # IFC profile + solids
 # =============================================================================
@@ -742,6 +799,7 @@ def create_ifc_envelope(
     depth_m: Optional[float] = None,
     max_roof_rise_m: Optional[float] = None,
     ground_footprint_points=None,
+    street_metrics: Optional[Dict[str, Any]] = None,
 ):
     """
     Create one IFC representing the parcel envelope.
@@ -829,6 +887,7 @@ def create_ifc_envelope(
 
     # Attach constraints (optional metadata)
     _add_pset_roof_slopes(model, proxy, roof_slope_deg_real, roof_slope_deg_virtual)
+    _add_pset_street_metrics(model, proxy, street_metrics)
 
     # Contain in storey
     _attach_proxy_to_storey(model, storey, proxy)

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import math
+import ast
+import importlib.util
 from pathlib import Path
 from typing import Dict, Any, List, Tuple, Optional
 
@@ -33,103 +35,82 @@ def _ensure_open(points: List[Point2]) -> List[Point2]:
     return points
 
 
-def _ensure_closed(points: List[Point2]) -> List[Point2]:
-    if not points:
-        return points
-    if points[0] != points[-1]:
-        return points + [points[0]]
-    return points
+def _load_urban_microservice_obtain_streets():
+    """
+    Load ACCORD Urban-Regulation-Microservice preprocessing utility.
+    Returns (obtain_streets_callable, loaded_module).
+    Raises RuntimeError if unavailable or invalid.
+    """
+    this_dir = Path(__file__).resolve().parent
+    root = this_dir.parent
+    utils_path = root / "Urban-Regulation-Microservice" / "Urban-Regulation-Microservice" / "apps" / "Preprocessing" / "utils.py"
+
+    if not utils_path.exists():
+        raise RuntimeError(
+            "Urban-Regulation-Microservice not found at expected path: "
+            "Urban-Regulation-Microservice/Urban-Regulation-Microservice/apps/Preprocessing/utils.py"
+        )
+
+    try:
+        spec = importlib.util.spec_from_file_location("urban_reg_preprocess_utils", str(utils_path))
+        if spec is None or spec.loader is None:
+            raise RuntimeError("Unable to load Urban-Regulation-Microservice preprocessing module")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        obtain_streets = getattr(module, "obtain_streets", None)
+        if not callable(obtain_streets):
+            raise RuntimeError("Urban-Regulation-Microservice loaded but obtain_streets is not callable")
+        return obtain_streets, module
+    except Exception as e:
+        raise RuntimeError(f"Failed loading Urban-Regulation-Microservice preprocessing utility: {e}") from e
 
 
-def _segment_length(seg: Tuple[Point2, Point2]) -> float:
-    (x1, y1), (x2, y2) = seg
-    return float(math.hypot(x2 - x1, y2 - y1))
+def _load_urban_microservice_simplify_algorithms():
+    """
+    Load simplify helper algorithms directly from Urban-Regulation-Microservice
+    source file `apps/Preprocessing/views/create_simplified_cadastre.py`.
 
+    Returns callables:
+      - filter_vertices(points, angle_threshold)
+      - calculate_segments(points)
+      - calculate_segment_length(segment)
+    """
+    this_dir = Path(__file__).resolve().parent
+    root = this_dir.parent
+    src_path = root / "Urban-Regulation-Microservice" / "Urban-Regulation-Microservice" / "apps" / "Preprocessing" / "views" / "create_simplified_cadastre.py"
 
-def _calculate_angle(p1: Point2, p2: Point2, p3: Point2) -> float:
-    v1 = (p2[0] - p1[0], p2[1] - p1[1])
-    v2 = (p3[0] - p2[0], p3[1] - p2[1])
-    n1 = math.hypot(v1[0], v1[1])
-    n2 = math.hypot(v2[0], v2[1])
-    if n1 == 0.0 or n2 == 0.0:
-        return 0.0
-    dot = v1[0] * v2[0] + v1[1] * v2[1]
-    c = max(-1.0, min(1.0, dot / (n1 * n2)))
-    return float(math.acos(c))
+    if not src_path.exists():
+        raise RuntimeError(
+            "Urban-Regulation-Microservice simplify source not found at expected path: "
+            "Urban-Regulation-Microservice/Urban-Regulation-Microservice/apps/Preprocessing/views/create_simplified_cadastre.py"
+        )
 
+    try:
+        source = src_path.read_text(encoding="utf-8")
+        tree = ast.parse(source, filename=str(src_path))
+        needed = {"calculate_angle", "calculate_angles", "filter_vertices", "calculate_segments", "calculate_segment_length"}
 
-def _filter_vertices(points: List[Point2], angle_threshold: float) -> List[Point2]:
-    pts = _ensure_open(points)
-    if len(pts) < 3:
-        return pts
-    out: List[Point2] = []
-    n = len(pts)
-    for i in range(n):
-        p1 = pts[i - 1]
-        p2 = pts[i]
-        p3 = pts[(i + 1) % n]
-        ang = _calculate_angle(p1, p2, p3)
-        if ang > angle_threshold:
-            out.append(p2)
-    return out if len(out) >= 3 else pts
+        selected_defs = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in needed]
+        if len(selected_defs) < len(needed):
+            missing = sorted(list(needed - {n.name for n in selected_defs}))
+            raise RuntimeError(f"Missing expected functions in microservice simplify source: {missing}")
 
+        module_ast = ast.Module(body=selected_defs, type_ignores=[])
+        compiled = compile(module_ast, filename=str(src_path), mode="exec")
 
-def _centroid(points: List[Point2]) -> Point2:
-    pts = _ensure_open(points)
-    if not pts:
-        return (0.0, 0.0)
-    sx = sum(p[0] for p in pts)
-    sy = sum(p[1] for p in pts)
-    n = len(pts)
-    return (sx / n, sy / n)
+        import numpy as np
 
+        ns: Dict[str, Any] = {"np": np}
+        exec(compiled, ns, ns)
 
-def _outward_normal(seg: Tuple[Point2, Point2], centroid: Point2) -> Point2:
-    (x1, y1), (x2, y2) = seg
-    dx, dy = (x2 - x1, y2 - y1)
-    n1 = (-dy, dx)
-    n2 = (dy, -dx)
-    mx, my = ((x1 + x2) * 0.5, (y1 + y2) * 0.5)
-    to_c = (centroid[0] - mx, centroid[1] - my)
-
-    dot1 = n1[0] * to_c[0] + n1[1] * to_c[1]
-    nx, ny = n2 if dot1 > 0 else n1
-    norm = math.hypot(nx, ny)
-    if norm == 0.0:
-        return (0.0, 0.0)
-    return (nx / norm, ny / norm)
-
-
-def _cross(a: Point2, b: Point2) -> float:
-    return a[0] * b[1] - a[1] * b[0]
-
-
-def _ray_segment_intersection_distance(origin: Point2, direction: Point2, a: Point2, b: Point2, max_distance: float) -> Optional[float]:
-    seg = (b[0] - a[0], b[1] - a[1])
-    denom = _cross(direction, seg)
-    if abs(denom) < 1e-12:
-        return None
-
-    ao = (a[0] - origin[0], a[1] - origin[1])
-    t = _cross(ao, seg) / denom
-    u = _cross(ao, direction) / denom
-
-    if t < 0:
-        return None
-    if u < 0 or u > 1:
-        return None
-
-    dist = t * math.hypot(direction[0], direction[1])
-    if dist > max_distance:
-        return None
-    return float(dist)
-
-
-def _segments_from_points(points: List[Point2]) -> List[Tuple[Point2, Point2]]:
-    pts = _ensure_open(points)
-    if len(pts) < 2:
-        return []
-    return [(pts[i], pts[(i + 1) % len(pts)]) for i in range(len(pts))]
+        fv = ns.get("filter_vertices")
+        cs = ns.get("calculate_segments")
+        csl = ns.get("calculate_segment_length")
+        if not (callable(fv) and callable(cs) and callable(csl)):
+            raise RuntimeError("Loaded microservice simplify functions are not callable")
+        return fv, cs, csl
+    except Exception as e:
+        raise RuntimeError(f"Failed loading Urban-Regulation-Microservice simplify algorithms: {e}") from e
 
 
 def _get_polygon_for_refcat(refcat: str, poum_gml_path: str, source: str, poum_mode: str) -> Optional[List[Point2]]:
@@ -159,9 +140,9 @@ def generate_simplified_cadastre_like_file(
     idx = build_refcat_to_poum_index(poum_gml_path)
     refcats = sorted(idx.keys())
 
-    parcels_data: Dict[str, Any] = {}
-    polygons_by_id: Dict[str, List[Point2]] = {}
+    filter_vertices, calculate_segments, calculate_segment_length = _load_urban_microservice_simplify_algorithms()
 
+    parcels_data: Dict[str, Any] = {}
     for refcat in refcats:
         try:
             points = _get_polygon_for_refcat(refcat, poum_gml_path, source=source, poum_mode=poum_mode)
@@ -172,8 +153,8 @@ def generate_simplified_cadastre_like_file(
             continue
 
         points = _ensure_open(points)
-        vertices = _filter_vertices(points, angle_threshold=angle_threshold)
-        segments = _segments_from_points(vertices)
+        vertices = filter_vertices(points, angle_threshold=angle_threshold)
+        segments = calculate_segments(vertices)
 
         segments_data = []
         for i, seg in enumerate(segments):
@@ -181,7 +162,7 @@ def generate_simplified_cadastre_like_file(
                 {
                     "id": f"{refcat}_{i}",
                     "segment": [[float(seg[0][0]), float(seg[0][1])], [float(seg[1][0]), float(seg[1][1])]],
-                    "length": _segment_length(seg),
+                    "length": float(calculate_segment_length(seg)),
                 }
             )
 
@@ -190,45 +171,12 @@ def generate_simplified_cadastre_like_file(
             "points": [[float(x), float(y)] for x, y in points],
             "segments": segments_data,
         }
-        polygons_by_id[refcat] = points
 
-    # Infer street-like widths (similar to ACCORD, not identical)
-    for refcat, parcel in parcels_data.items():
-        current_points = polygons_by_id[refcat]
-        c = _centroid(current_points)
-
-        for seg_data in parcel["segments"]:
-            p0 = tuple(seg_data["segment"][0])
-            p1 = tuple(seg_data["segment"][1])
-            seg = (p0, p1)
-
-            if seg_data["length"] <= 0.1:
-                continue
-
-            n = _outward_normal(seg, c)
-            if n == (0.0, 0.0):
-                continue
-
-            mx = (p0[0] + p1[0]) * 0.5
-            my = (p0[1] + p1[1]) * 0.5
-            origin = (mx - n[0] * offset_distance, my - n[1] * offset_distance)
-            direction = (n[0] * max_distance, n[1] * max_distance)
-
-            min_dist: Optional[float] = None
-
-            for other_id, other_points in polygons_by_id.items():
-                if other_id == refcat:
-                    continue
-
-                for edge in _segments_from_points(other_points):
-                    d = _ray_segment_intersection_distance(origin, direction, edge[0], edge[1], max_distance=max_distance)
-                    if d is not None and (min_dist is None or d < min_dist):
-                        min_dist = d
-
-            if min_dist is None:
-                seg_data["street"] = float(max_distance)
-            elif min_dist > 0.1:
-                seg_data["street"] = round(float(min_dist), 2)
+    # Street inference strictly via Urban-Regulation-Microservice functionality
+    obtain_streets, module = _load_urban_microservice_obtain_streets()
+    module.MAX_DISTANCE = float(max_distance)
+    module.OFFSET_DISTANCE = float(offset_distance)
+    obtain_streets(parcels_data)
 
     output_path = Path(output_file_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -237,4 +185,5 @@ def generate_simplified_cadastre_like_file(
     return {
         "output_file": str(output_path),
         "parcel_count": len(parcels_data),
+        "street_engine_used": "urban_microservice",
     }

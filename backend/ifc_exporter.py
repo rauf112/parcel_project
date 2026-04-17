@@ -788,6 +788,96 @@ def _hip_roof_halfspaces(model, pts2: List[Point2], h_eaves: float, slope_deg: f
 # Public API
 # =============================================================================
 
+def _compute_rise_max(pts2: List[Point2], slope_deg: float, max_rise_m: Optional[float] = None) -> float:
+    """Compute hip-roof max ridge rise. Pure Python, no IFC entities needed."""
+    pts2 = _ensure_ring_open(pts2)
+    t = math.tan(math.radians(float(slope_deg)))
+    rx, ry = _pick_ridge_dir_longest_edge(pts2)
+    sx, sy = (-ry, rx)
+    proj_r = [x * rx + y * ry for (x, y) in pts2]
+    proj_s = [x * sx + y * sy for (x, y) in pts2]
+    span_r = max(proj_r) - min(proj_r)
+    span_s = max(proj_s) - min(proj_s)
+    rise = max(span_r * 0.5, span_s * 0.5) * t
+    if max_rise_m is not None:
+        rise = min(rise, float(max_rise_m))
+    return float(rise)
+
+
+def _build_envelope_brep(
+    model: ifcopenshell.file,
+    pts2: List[Point2],
+    h_bottom: float,
+    h_eaves: float,
+    h_top: float,
+    include_bottom_face: bool = True,
+) -> object:
+    """
+    Build a closed walls+pyramidal-hip-roof solid as IfcFacetedBrep.
+    All geometry is computed in pure Python — no OpenCASCADE / geom kernel needed.
+
+    pts2            : local 2D footprint (order preserved, normalised to CCW)
+    h_bottom        : Z of the base (usually 0.0)
+    h_eaves         : Z of the top of walls / bottom of roof
+    h_top           : Z of the roof apex (centroid point)
+    include_bottom_face : close the solid with a bottom face
+    """
+    from shapely.geometry import Polygon as _SP
+    pts2 = _ensure_ring_open(pts2)
+    n = len(pts2)
+    sp = _SP(pts2)
+    # Ensure CCW winding (outward normals, right-hand rule)
+    if sp.exterior.is_ccw:
+        ring = [(float(x), float(y)) for x, y in pts2]
+    else:
+        ring = [(float(x), float(y)) for x, y in reversed(pts2)]
+    cx = sum(p[0] for p in ring) / n
+    cy = sum(p[1] for p in ring) / n
+
+    def _pt(x, y, z):
+        return model.create_entity("IfcCartesianPoint", Coordinates=(float(x), float(y), float(z)))
+
+    def _face(*verts):
+        loop = model.create_entity("IfcPolyLoop", Polygon=[_pt(*v) for v in verts])
+        bound = model.create_entity("IfcFaceOuterBound", Bound=loop, Orientation=True)
+        return model.create_entity("IfcFace", Bounds=[bound])
+
+    faces = []
+    has_walls = abs(h_eaves - h_bottom) > 1e-6
+    has_roof  = abs(h_top   - h_eaves)  > 1e-6
+
+    # Bottom face (outward normal = -Z  →  CW from above = reverse CCW ring)
+    if include_bottom_face:
+        faces.append(_face(*[(ring[i][0], ring[i][1], h_bottom) for i in range(n - 1, -1, -1)]))
+
+    # Vertical wall quads
+    if has_walls:
+        for i in range(n):
+            j = (i + 1) % n
+            faces.append(_face(
+                (ring[i][0], ring[i][1], h_bottom),
+                (ring[j][0], ring[j][1], h_bottom),
+                (ring[j][0], ring[j][1], h_eaves),
+                (ring[i][0], ring[i][1], h_eaves),
+            ))
+
+    # Roof: triangular hip faces from eaves ring to apex
+    if has_roof:
+        for i in range(n):
+            j = (i + 1) % n
+            faces.append(_face(
+                (ring[i][0], ring[i][1], h_eaves),
+                (ring[j][0], ring[j][1], h_eaves),
+                (cx, cy, h_top),
+            ))
+    else:
+        # Flat top cap
+        faces.append(_face(*[(ring[i][0], ring[i][1], h_eaves) for i in range(n)]))
+
+    face_set = model.create_entity("IfcConnectedFaceSet", CfsFaces=faces)
+    return model.create_entity("IfcFacetedBrep", Outer=face_set)
+
+
 def create_ifc_envelope(
     footprint_points: List[Point2],
     height: float,
@@ -911,36 +1001,20 @@ def create_ifc_envelope(
         )
 
     else:
-        # Walls up to eaves (ALTMAX)
-        walls_solid = _make_extruded_solid(model, profile, depth=h_eaves)
-
-        # Build a tall roof base, clip by hip planes
-        halfspaces_roof, rise_max = _hip_roof_halfspaces(model, pts2_buildable, h_eaves, float(roof_slope_deg_real), max_rise_m=max_roof_rise_m)
-        big_height = h_eaves + rise_max + 1.0
-        roof_base = _make_extruded_solid(model, profile, depth=big_height)
-
-        # Roof wedge (hip planes intersection)
-        roof_wedge = _clip_intersections(model, roof_base, halfspaces_roof)
-
-        # Force roof to start ABOVE eaves (avoid coplanar overlap / z-fighting)
-        eps = 0.001  # 1mm
-        hs_above = _horizontal_halfspace(model, h_eaves + eps, keep="above")
-        roof_wedge = _clip_intersections(model, roof_wedge, [hs_above])
-
-        # Keep only roof part above eaves (subtract walls volume)
-        roof_only = _bool(model, "DIFFERENCE", roof_wedge, walls_solid)
-
-        # Final envelope
-        envelope_solid = _bool(model, "UNION", walls_solid, roof_only)
-
+        # Hip-roof envelope as IfcFacetedBrep (pure Python, no CSG/geom kernel)
+        rise = _compute_rise_max(pts2_buildable, float(roof_slope_deg_real), max_roof_rise_m)
+        h_max = h_eaves + rise
+        envelope_brep = _build_envelope_brep(
+            model, pts2_buildable,
+            h_bottom=0.0, h_eaves=h_eaves, h_top=h_max,
+        )
         shape_rep = model.create_entity(
             "IfcShapeRepresentation",
             ContextOfItems=context,
             RepresentationIdentifier="Body",
-            RepresentationType="CSG",
-            Items=[envelope_solid],
+            RepresentationType="Brep",
+            Items=[envelope_brep],
         )
-        # Assign layer after shape_rep is created
         _assign_layer(model, shape_rep.Items, "REAL_ENVELOPE")
 
 
@@ -967,37 +1041,21 @@ def create_ifc_envelope(
         # Optional: also store both constraints on the virtual element
         _add_pset_roof_slopes(model, virtual_proxy, roof_slope_deg_real, roof_slope_deg_virtual)
 
-        # Build virtual roof wedge with virtual slope
-        hs_virtual, rise_v = _hip_roof_halfspaces(model, pts2_buildable, h_eaves, float(roof_slope_deg_virtual), max_rise_m=max_roof_rise_m)
-        big_h_v = h_eaves + rise_v + 1.0
-        roof_base_v = _make_extruded_solid(model, profile, depth=big_h_v)
-
-        roof_wedge_v = _clip_intersections(model, roof_base_v, hs_virtual)
-
-        # Start strictly above eaves (avoid overlap)
-        eps = 0.001
-        hs_above_v = _horizontal_halfspace(model, h_eaves + eps, keep="above")
-        roof_wedge_v = _clip_intersections(model, roof_wedge_v, [hs_above_v])
-
-        # Keep only roof (remove any part that coincides with walls)
-        walls_solid_v = _make_extruded_solid(model, profile, depth=h_eaves)
-        roof_only_v = _bool(model, "DIFFERENCE", roof_wedge_v, walls_solid_v)
-
-
+        # Virtual roof as IfcFacetedBrep pyramid (roof portion only, h_eaves → apex)
+        rise_v = _compute_rise_max(pts2_buildable, float(roof_slope_deg_virtual), max_roof_rise_m)
+        h_max_v = h_eaves + rise_v
+        roof_brep_v = _build_envelope_brep(
+            model, pts2_buildable,
+            h_bottom=h_eaves, h_eaves=h_eaves, h_top=h_max_v,
+        )
         virtual_shape_rep = model.create_entity(
             "IfcShapeRepresentation",
             ContextOfItems=context,
             RepresentationIdentifier="Body",
-            RepresentationType="CSG",
-            Items=[roof_only_v],
+            RepresentationType="Brep",
+            Items=[roof_brep_v],
         )
-
-        # Put virtual roof on its own layer
         _assign_layer(model, virtual_shape_rep.Items, "VIRTUAL_ROOF")
-
-        # Transparency + color (virtual roof)
-        for it in virtual_shape_rep.Items:
-            _style_item(model, it, rgb=(0.2, 0.6, 1.0), transparency=0.75, name="VirtualRoofStyle")
 
         virtual_proxy.Representation = model.create_entity(
             "IfcProductDefinitionShape",

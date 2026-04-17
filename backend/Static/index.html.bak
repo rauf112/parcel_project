@@ -1,0 +1,1006 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Parcel BIM/GIS Automation</title>
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+      "three/examples/jsm/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+    }
+  }
+  </script>
+  <style>
+    :root { --border:#d9dde3; --bg:#f6f7f9; --text:#111827; --muted:#6b7280; --primary:#1f6feb; --ok:#059669; --err:#dc2626;}
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial; margin:0; background:var(--bg); color:var(--text); }
+    .wrap { max-width: 980px; margin: 28px auto; padding: 0 16px; }
+    .grid { display:grid; grid-template-columns: 360px 1fr; gap: 16px; align-items:start; }
+    .card { background:#fff; border:1px solid var(--border); border-radius: 10px; box-shadow: 0 1px 2px rgba(0,0,0,.04); }
+    .card h2 { margin:0; padding: 14px 16px; border-bottom:1px solid var(--border); font-size: 16px; }
+    .content { padding: 16px; }
+    label { display:block; font-size: 13px; color: var(--muted); margin-bottom: 6px; }
+    select, input, button, textarea { width:100%; padding:10px 10px; border-radius: 8px; border:1px solid var(--border); font-size: 14px; background:#fff; box-sizing: border-box; }
+    select:disabled, input:disabled, textarea:disabled { background:#f3f4f6; color:#9ca3af; }
+    .row { margin-bottom: 14px; }
+    .checkbox { display:flex; align-items:center; gap:10px; margin: 10px 0 14px; user-select:none; }
+    .checkbox input { width:16px; height:16px; }
+    .btn { background: var(--primary); border:1px solid #1a5dd1; color:#fff; font-weight:600; cursor:pointer; }
+    .btn:disabled { opacity:.55; cursor:not-allowed; }
+    .status { margin-top: 10px; font-size: 13px; }
+    .ok { color: var(--ok); }
+    .err { color: var(--err); }
+    .muted { color: var(--muted); }
+    .pill { display:inline-block; padding: 2px 8px; border-radius:999px; border:1px solid var(--border); font-size:12px; color:var(--muted); }
+    .progress { height: 10px; background:#eef2ff; border:1px solid var(--border); border-radius:999px; overflow:hidden; }
+    .bar { height: 100%; width:0%; background: var(--primary); transition: width .2s ease; }
+    .logs { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; background:#0b1220; color:#d1d5db; padding: 12px; border-radius: 10px; overflow:auto; max-height: 260px; border:1px solid #101827; }
+    .files a { color: var(--primary); text-decoration:none; }
+    .files a:hover { text-decoration:underline; }
+    .small { font-size:12px; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    .viz-wrap { border:1px solid var(--border); border-radius: 10px; background:#fff; padding:10px; }
+    .viz-svg { width:100%; height:320px; display:block; background:#f9fafb; border:1px dashed #cbd5e1; border-radius:8px; }
+    .legend { display:flex; gap:14px; align-items:center; flex-wrap:wrap; margin-top:8px; }
+    .legend-item { display:flex; align-items:center; gap:6px; font-size:12px; color:var(--muted); }
+    .legend-dot { width:12px; height:12px; border-radius:3px; display:inline-block; }
+    .viewer3d { width:100%; height:420px; border:1px solid var(--border); border-radius:10px; background:#f8fafc; overflow:hidden; }
+    .viewer-legend { display:flex; gap:14px; align-items:center; flex-wrap:wrap; margin-top:8px; }
+    .viewer-legend .item { display:flex; align-items:center; gap:6px; font-size:12px; color:#4b5563; }
+    .viewer-legend .sw { width:14px; height:14px; border-radius:4px; border:1px solid #9ca3af; display:inline-block; }
+  </style>
+</head>
+
+<body>
+  <div class="wrap">
+    <h1 style="margin:0 0 12px;">Parcel BIM/GIS Automation</h1>
+    <div class="grid">
+      <div class="card">
+        <h2>Generator</h2>
+        <div class="content">
+          <div class="row">
+            <label for="municipality">Select municipality</label>
+            <select id="municipality">
+              <option value="">Select</option>
+            </select>
+          </div>
+
+          <div class="checkbox">
+            <input type="checkbox" id="allParcels" />
+            <div>
+              <div style="font-weight:600;">All parcels</div>
+              <div class="small muted">If checked, generates IFC for all parcels in the municipality.</div>
+            </div>
+          </div>
+
+          <div class="row">
+            <label for="refcat">Select cadastral reference</label>
+            <select id="refcat" disabled>
+              <option value="">Select</option>
+            </select>
+            <div class="small muted" id="refHint" style="margin-top:6px;">
+              Select a municipality first.
+            </div>
+          </div>
+
+          <button id="generateBtn" class="btn" disabled>Generate IFC</button>
+
+          <div class="status" id="status"></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Run status <span class="pill" id="jobPill">idle</span></h2>
+        <div class="content">
+          <div class="row">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
+              <div class="small muted">Progress</div>
+              <div class="small muted" id="progressText">0%</div>
+            </div>
+            <div class="progress"><div class="bar" id="bar"></div></div>
+          </div>
+
+          <div class="row">
+            <div class="small muted" style="margin-bottom:6px;">Logs</div>
+            <div class="logs" id="logs">(no logs)</div>
+          </div>
+
+          <div class="row">
+            <div class="small muted" style="margin-bottom:6px;">Outputs</div>
+            <div class="files" id="files">(no files)</div>
+          </div>
+
+          <div class="small muted">
+            API docs: <a href="/docs" target="_blank" rel="noreferrer">/docs</a>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card" style="margin-top:16px;">
+      <h2>Volume Compliance Check (MVP)</h2>
+      <div class="content">
+        <div class="row">
+          <label for="checkArchitectIfcPath">Architect IFC path</label>
+          <input id="checkArchitectIfcPath" type="text" placeholder="outputs/architect.ifc" />
+          <div class="small muted" style="margin-top:6px;">Path is resolved by backend. Example: outputs/malgrat_000302300DG70H_23_envelope.ifc</div>
+        </div>
+
+        <div style="display:grid; grid-template-columns: 1fr 1fr; gap: 12px;">
+          <div class="row" style="margin-bottom:0;">
+            <label for="checkTolerance">Tolerance (m)</label>
+            <input id="checkTolerance" type="number" step="0.001" min="0" value="0.01" />
+          </div>
+          <div class="checkbox" style="margin: 24px 0 0;">
+            <input type="checkbox" id="checkKeepAllowedIfc" checked />
+            <div>
+              <div style="font-weight:600;">Keep allowed IFC</div>
+              <div class="small muted">If unchecked, temporary allowed IFC will be deleted after check.</div>
+            </div>
+          </div>
+        </div>
+
+        <button id="checkComplianceBtn" class="btn">Run Volume Compliance Check</button>
+        <div class="status" id="checkStatus"></div>
+
+        <div class="row" style="margin-top:12px;">
+          <div class="small muted" style="margin-bottom:6px;">Response preview</div>
+          <textarea id="checkResponse" class="mono" rows="14" readonly placeholder="Response will appear here..."></textarea>
+        </div>
+
+        <div class="row" style="margin-top:12px;">
+          <div class="small muted" style="margin-bottom:6px;">Visual comparison (top view)</div>
+          <div class="viz-wrap">
+            <svg id="checkViz" class="viz-svg" viewBox="0 0 640 320" preserveAspectRatio="xMidYMid meet"></svg>
+            <div class="legend">
+              <div class="legend-item"><span class="legend-dot" style="background:#2563eb33;border:1px solid #1d4ed8;"></span>Allowed</div>
+              <div class="legend-item"><span class="legend-dot" style="background:#10b98133;border:1px solid #059669;"></span>Project</div>
+              <div class="legend-item"><span class="legend-dot" style="background:#f59e0b55;border:1px solid #d97706;"></span>Intersection</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="small muted">MVP note: method may be <span class="mono">ground_floor_perimeter_temp_volume</span> or fallback <span class="mono">bbox</span>; both are approximate checks.</div>
+      </div>
+    </div>
+
+    <div class="card" style="margin-top:16px;">
+      <h2>IFC 3D Viewer (Embedded)</h2>
+      <div class="content">
+        <div style="display:grid; grid-template-columns: 1fr 1fr 1fr 1fr; gap: 10px; margin-bottom:10px;">
+          <button id="loadArchitect3DBtn" class="btn">Load Architect IFC</button>
+          <button id="loadAllowed3DBtn" class="btn">Load Allowed IFC</button>
+          <button id="loadBoth3DBtn" class="btn">Load Both</button>
+          <button id="clear3DBtn">Clear</button>
+        </div>
+        <div style="display:grid; grid-template-columns: 1fr; gap: 10px; margin-bottom:10px;">
+          <button id="renderFallback3DBtn">Render Compliance Volumes (Fallback 3D)</button>
+        </div>
+        <div class="small muted" id="viewer3DStatus" style="margin-bottom:8px;">Viewer idle.</div>
+        <div id="ifc3DContainer" class="viewer3d"></div>
+        <div class="viewer-legend">
+          <div class="item"><span class="sw" style="background:#2563eb88;border-color:#1d4ed8"></span>Allowed volume</div>
+          <div class="item"><span class="sw" style="background:#10b98188;border-color:#047857"></span>Project volume</div>
+          <div class="item"><span class="sw" style="background:#f59e0b88;border-color:#b45309"></span>Overlap zone</div>
+        </div>
+        <div class="small muted" style="margin-top:8px;">Tip: Önce compliance check çalıştır, sonra "Load Allowed IFC" veya "Load Both" ile aynı sahnede aç.</div>
+      </div>
+    </div>
+  </div>
+
+<script>
+  const municipalityEl = document.getElementById("municipality");
+  const allParcelsEl = document.getElementById("allParcels");
+  const refcatEl = document.getElementById("refcat");
+  const refHintEl = document.getElementById("refHint");
+  const generateBtn = document.getElementById("generateBtn");
+  const statusEl = document.getElementById("status");
+
+  const jobPill = document.getElementById("jobPill");
+  const logsEl = document.getElementById("logs");
+  const filesEl = document.getElementById("files");
+  const barEl = document.getElementById("bar");
+  const progressTextEl = document.getElementById("progressText");
+  const checkArchitectIfcPathEl = document.getElementById("checkArchitectIfcPath");
+  const checkToleranceEl = document.getElementById("checkTolerance");
+  const checkKeepAllowedIfcEl = document.getElementById("checkKeepAllowedIfc");
+  const checkComplianceBtn = document.getElementById("checkComplianceBtn");
+  const checkStatusEl = document.getElementById("checkStatus");
+  const checkResponseEl = document.getElementById("checkResponse");
+  const checkVizEl = document.getElementById("checkViz");
+  const ifc3DContainerEl = document.getElementById("ifc3DContainer");
+  const viewer3DStatusEl = document.getElementById("viewer3DStatus");
+  const loadArchitect3DBtn = document.getElementById("loadArchitect3DBtn");
+  const loadAllowed3DBtn = document.getElementById("loadAllowed3DBtn");
+  const loadBoth3DBtn = document.getElementById("loadBoth3DBtn");
+  const clear3DBtn = document.getElementById("clear3DBtn");
+  const renderFallback3DBtn = document.getElementById("renderFallback3DBtn");
+
+  let pollTimer = null;
+  let currentJobId = null;
+  let lastComplianceResponse = null;
+  let ifcViewer = null;
+  let loadedModelIds = [];
+  let fallbackRenderer = null;
+  let fallbackDispose = null;
+
+  function setStatus(msg, type="muted") {
+    statusEl.className = "status " + (type === "ok" ? "ok" : type === "err" ? "err" : "muted");
+    statusEl.textContent = msg || "";
+  }
+
+  function setJobState(state) {
+    jobPill.textContent = state;
+  }
+
+  function setProgress01(p01) {
+    const pct = Math.round((p01 || 0) * 100);
+    barEl.style.width = pct + "%";
+    progressTextEl.textContent = pct + "%";
+  }
+
+  function setLogs(lines) {
+    if (!lines || !lines.length) {
+      logsEl.textContent = "(no logs)";
+      return;
+    }
+    logsEl.textContent = lines.join("\n");
+    logsEl.scrollTop = logsEl.scrollHeight;
+  }
+
+  function setFiles(files) {
+    if (!files || !files.length) {
+      filesEl.textContent = "(no files)";
+      return;
+    }
+    filesEl.innerHTML = "";
+    const ul = document.createElement("ul");
+    ul.style.margin = "0";
+    ul.style.paddingLeft = "18px";
+    for (const f of files) {
+      const li = document.createElement("li");
+      const a = document.createElement("a");
+      a.href = f.download_url || "#";
+      a.textContent = f.file || f.path || "output";
+      a.target = "_blank";
+      a.rel = "noreferrer";
+      li.appendChild(a);
+
+      if (f.path) {
+        const p = document.createElement("div");
+        p.className = "small muted";
+        p.textContent = f.path;
+        li.appendChild(p);
+      }
+      ul.appendChild(li);
+    }
+    filesEl.appendChild(ul);
+  }
+
+  function setCheckStatus(msg, type="muted") {
+    checkStatusEl.className = "status " + (type === "ok" ? "ok" : type === "err" ? "err" : "muted");
+    checkStatusEl.textContent = msg || "";
+  }
+
+  function setViewer3DStatus(msg, type="muted") {
+    viewer3DStatusEl.className = "small " + (type === "ok" ? "ok" : type === "err" ? "err" : "muted");
+    viewer3DStatusEl.textContent = msg || "";
+  }
+
+  function toIfcUrl(pathLike) {
+    if (!pathLike) return null;
+    const s = String(pathLike).trim().replace(/\\/g, "/");
+    if (!s) return null;
+    if (/^https?:\/\//i.test(s)) return s;
+    if (s.toLowerCase().startsWith("outputs/")) return "/" + s;
+    const idx = s.toLowerCase().lastIndexOf("/outputs/");
+    if (idx >= 0) return s.slice(idx);
+    return null;
+  }
+
+  async function ensureIfcViewer() {
+    if (ifcViewer) return ifcViewer;
+    ifc3DContainerEl.innerHTML = "";
+    setViewer3DStatus("Initializing IFC viewer...");
+    const mod = await import("https://unpkg.com/web-ifc-viewer@1.0.213/dist/ifc-viewer-api.js");
+    const IfcViewerAPI = mod.IfcViewerAPI || mod.default?.IfcViewerAPI || mod.default;
+    if (!IfcViewerAPI) {
+      throw new Error("IfcViewerAPI export not found from bundled module.");
+    }
+    ifcViewer = new IfcViewerAPI({ container: ifc3DContainerEl });
+    await ifcViewer.IFC.setWasmPath("https://unpkg.com/web-ifc@0.0.44/");
+    try {
+      ifcViewer.IFC.loader.ifcManager.applyWebIfcConfig({
+        COORDINATE_TO_ORIGIN: true,
+        USE_FAST_BOOLS: true,
+      });
+    } catch {}
+    ifcViewer.grid.setGrid();
+    ifcViewer.axes.setAxes();
+    setViewer3DStatus("Viewer ready.", "ok");
+    return ifcViewer;
+  }
+
+  async function clearIfcViewer() {
+    ifcViewer = null;
+    loadedModelIds = [];
+    if (fallbackDispose) {
+      try { fallbackDispose(); } catch {}
+      fallbackDispose = null;
+    }
+    fallbackRenderer = null;
+    ifc3DContainerEl.innerHTML = "";
+    setViewer3DStatus("Viewer cleared.");
+  }
+
+  async function loadIfcInViewer(url, label) {
+    const viewer = await ensureIfcViewer();
+    const model = await viewer.IFC.loadIfcUrl(url);
+    const modelId = (typeof model?.modelID === "number") ? model.modelID : null;
+    if (modelId !== null) loadedModelIds.push(modelId);
+
+    // Some envelope IFCs are open surfaces; make them visible from both sides.
+    try {
+      const THREE = await import("three");
+      model.traverse((obj) => {
+        if (!obj || !obj.isMesh || !obj.material) return;
+        const applySide = (mat) => {
+          if (!mat) return;
+          mat.side = THREE.DoubleSide;
+          mat.needsUpdate = true;
+        };
+        if (Array.isArray(obj.material)) obj.material.forEach(applySide);
+        else applySide(obj.material);
+      });
+    } catch {}
+
+    try {
+      await viewer.context.fitToFrame();
+    } catch {}
+    try {
+      viewer.context.ifcCamera.cameraControls.setLookAt(30, 20, 30, 0, 0, 0, false);
+    } catch {}
+    const modelText = typeof modelId === "number" ? ` (modelID=${modelId})` : "";
+    setViewer3DStatus(`Loaded: ${label}${modelText}`, "ok");
+    return { modelId };
+  }
+
+  async function renderComplianceFallback3D(response) {
+    if (!response) {
+      throw new Error("Run compliance check first.");
+    }
+
+    const visual = response.visual || {};
+    const allowedPoly = Array.isArray(visual.allowed_polygon_xy) ? visual.allowed_polygon_xy : [];
+    const projectPoly = Array.isArray(visual.project_polygon_xy) ? visual.project_polygon_xy : [];
+    const interPoly = Array.isArray(visual.intersection_polygon_xy) ? visual.intersection_polygon_xy : [];
+    function sanitizePoly(poly) {
+      const pts = poly
+        .map(p => ({ x: Number(p?.x), y: Number(p?.y) }))
+        .filter(p => Number.isFinite(p.x) && Number.isFinite(p.y));
+      if (pts.length < 3) return pts;
+
+      const key = (p) => `${p.x.toFixed(6)}|${p.y.toFixed(6)}`;
+      const unique = [];
+      const seen = new Set();
+      for (const p of pts) {
+        const k = key(p);
+        if (!seen.has(k)) {
+          seen.add(k);
+          unique.push(p);
+        }
+      }
+      return unique;
+    }
+
+    const allowedPolyClean = sanitizePoly(allowedPoly);
+    const projectPolyClean = sanitizePoly(projectPoly);
+    function centroid(poly) {
+      let sx = 0, sy = 0;
+      for (const p of poly) {
+        sx += Number(p.x) || 0;
+        sy += Number(p.y) || 0;
+      }
+      const n = Math.max(poly.length, 1);
+      return { x: sx / n, y: sy / n };
+    }
+
+        if (allowedPolyClean.length < 3 || projectPolyClean.length < 3) {
+      throw new Error("Compliance response has insufficient polygon data for 3D fallback.");
+    }
+
+    const THREE = await import("https://unpkg.com/three@0.160.0/build/three.module.js");
+    const OC = await import("https://unpkg.com/three@0.160.0/examples/jsm/controls/OrbitControls.js");
+    const OrbitControls = OC.OrbitControls;
+
+    if (fallbackDispose) {
+      try { fallbackDispose(); } catch {}
+      fallbackDispose = null;
+    }
+    ifc3DContainerEl.innerHTML = "";
+
+    const width = ifc3DContainerEl.clientWidth || 900;
+    const height = ifc3DContainerEl.clientHeight || 420;
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+    renderer.setSize(width, height);
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+    ifc3DContainerEl.appendChild(renderer.domElement);
+    fallbackRenderer = renderer;
+
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0xe5e7eb);
+
+    const camera = new THREE.PerspectiveCamera(55, width / height, 0.1, 100000);
+    camera.position.set(120, 90, 120);
+
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.enableDamping = true;
+    controls.target.set(0, 0, 0);
+
+    scene.add(new THREE.HemisphereLight(0xffffff, 0xd1d5db, 1.1));
+    const dir = new THREE.DirectionalLight(0xffffff, 0.8);
+    dir.position.set(50, 80, 30);
+    scene.add(dir);
+
+    const grid = new THREE.GridHelper(200, 16, 0x6b7280, 0x9ca3af);
+    scene.add(grid);
+    const axes = new THREE.AxesHelper(30);
+    scene.add(axes);
+
+    const interPolyClean = sanitizePoly(interPoly);
+
+    const allPts = [...allowedPolyClean, ...projectPolyClean, ...interPolyClean];
+    const worldCenter = centroid(allPts.length ? allPts : [{ x: 0, y: 0 }]);
+
+    function makeVolume(poly, height, color, opacity, edgeColor) {
+      const depth = Math.max(0.5, Number(height) || 1);
+      const shape = new THREE.Shape(
+        poly.map(pt => new THREE.Vector2(Number(pt.x) - worldCenter.x, Number(pt.y) - worldCenter.y))
+      );
+      const geometry = new THREE.ExtrudeGeometry(shape, { depth, bevelEnabled: false, steps: 1 });
+      geometry.rotateX(-Math.PI / 2);
+      geometry.computeBoundingBox();
+      const gbb = geometry.boundingBox;
+      if (gbb) {
+        geometry.translate(0, -gbb.min.y, 0);
+      }
+      const material = new THREE.MeshStandardMaterial({ color, transparent: true, opacity, roughness: 0.5, metalness: 0.0 });
+      const mesh = new THREE.Mesh(geometry, material);
+      mesh.position.y = 0;
+      const edges = new THREE.LineSegments(
+        new THREE.EdgesGeometry(geometry),
+        new THREE.LineBasicMaterial({ color: edgeColor || 0x111827 })
+      );
+      edges.position.copy(mesh.position);
+      return { mesh, edges };
+    }
+
+    function normalizeHeight(raw) {
+      const v = Number(raw);
+      if (!Number.isFinite(v) || v <= 0) return 8;
+      return Math.max(2, Math.min(v, 40));
+    }
+
+    const allowedHeight = normalizeHeight(response?.allowed_bbox?.size?.z);
+    const projectHeight = normalizeHeight(response?.project_bbox?.size?.z);
+
+    const allowedObj = makeVolume(allowedPolyClean, allowedHeight, 0x2563eb, 0.28, 0x1d4ed8);
+    const projectObj = makeVolume(projectPolyClean, projectHeight, 0x10b981, 0.28, 0x047857);
+    scene.add(allowedObj.mesh);
+    scene.add(projectObj.mesh);
+    scene.add(allowedObj.edges);
+    scene.add(projectObj.edges);
+
+    if (interPolyClean.length >= 3) {
+      const interHeight = Math.min(allowedHeight, projectHeight);
+      const interObj = makeVolume(interPolyClean, interHeight, 0xf59e0b, 0.22, 0xb45309);
+      scene.add(interObj.mesh);
+      scene.add(interObj.edges);
+    }
+
+    const bb = new THREE.Box3().setFromObject(scene);
+    const size = bb.getSize(new THREE.Vector3());
+    const center = bb.getCenter(new THREE.Vector3());
+    const maxDim = Math.max(size.x, size.y, size.z, 1);
+    camera.position.set(center.x + maxDim * 1.3, center.y + maxDim * 0.9, center.z + maxDim * 1.3);
+    controls.target.copy(center);
+    controls.update();
+
+    let running = true;
+    function animate() {
+      if (!running) return;
+      requestAnimationFrame(animate);
+      controls.update();
+      renderer.render(scene, camera);
+    }
+    animate();
+
+    const onResize = () => {
+      const w = ifc3DContainerEl.clientWidth || width;
+      const h = ifc3DContainerEl.clientHeight || height;
+      renderer.setSize(w, h);
+      camera.aspect = w / h;
+      camera.updateProjectionMatrix();
+    };
+    window.addEventListener("resize", onResize);
+
+    fallbackDispose = () => {
+      running = false;
+      window.removeEventListener("resize", onResize);
+      renderer.dispose();
+      scene.traverse(obj => {
+        if (obj.isMesh) {
+          obj.geometry?.dispose?.();
+          if (Array.isArray(obj.material)) obj.material.forEach(m => m?.dispose?.());
+          else obj.material?.dispose?.();
+        }
+      });
+    };
+  }
+
+  function setCheckResponse(data) {
+    try {
+      checkResponseEl.value = typeof data === "string" ? data : JSON.stringify(data, null, 2);
+    } catch {
+      checkResponseEl.value = String(data ?? "");
+    }
+  }
+
+  function renderComplianceViz(response) {
+    if (!checkVizEl) return;
+    const W = 640;
+    const H = 320;
+    const PAD = 16;
+
+    const visual = response?.visual || {};
+    const allowedRaw = Array.isArray(visual.allowed_polygon_xy) ? visual.allowed_polygon_xy : [];
+    const projectRaw = Array.isArray(visual.project_polygon_xy) ? visual.project_polygon_xy : [];
+    const interRaw = Array.isArray(visual.intersection_polygon_xy) ? visual.intersection_polygon_xy : [];
+
+    const toPt = (p) => ({ x: Number(p?.x), y: Number(p?.y) });
+    let allowed = allowedRaw.map(toPt).filter(p => Number.isFinite(p.x) && Number.isFinite(p.y));
+    let project = projectRaw.map(toPt).filter(p => Number.isFinite(p.x) && Number.isFinite(p.y));
+    let inter = interRaw.map(toPt).filter(p => Number.isFinite(p.x) && Number.isFinite(p.y));
+
+    if (!allowed.length || !project.length) {
+      const ab = response?.allowed_bbox;
+      const pb = response?.project_bbox;
+      if (ab?.min && ab?.max && pb?.min && pb?.max) {
+        allowed = [
+          { x: Number(ab.min.x), y: Number(ab.min.y) },
+          { x: Number(ab.max.x), y: Number(ab.min.y) },
+          { x: Number(ab.max.x), y: Number(ab.max.y) },
+          { x: Number(ab.min.x), y: Number(ab.max.y) },
+        ];
+        project = [
+          { x: Number(pb.min.x), y: Number(pb.min.y) },
+          { x: Number(pb.max.x), y: Number(pb.min.y) },
+          { x: Number(pb.max.x), y: Number(pb.max.y) },
+          { x: Number(pb.min.x), y: Number(pb.max.y) },
+        ];
+      }
+    }
+
+    const all = [...allowed, ...project, ...inter].filter(p => Number.isFinite(p.x) && Number.isFinite(p.y));
+    if (!all.length) {
+      checkVizEl.innerHTML = `<text x="16" y="24" fill="#6b7280" font-size="12">No geometry to visualize.</text>`;
+      return;
+    }
+
+    const minX = Math.min(...all.map(p => p.x));
+    const maxX = Math.max(...all.map(p => p.x));
+    const minY = Math.min(...all.map(p => p.y));
+    const maxY = Math.max(...all.map(p => p.y));
+
+    const spanX = Math.max(1e-6, maxX - minX);
+    const spanY = Math.max(1e-6, maxY - minY);
+    const scale = Math.min((W - PAD * 2) / spanX, (H - PAD * 2) / spanY);
+
+    const cx = (minX + maxX) / 2;
+    const cy = (minY + maxY) / 2;
+
+    function sx(x) { return W / 2 + (x - cx) * scale; }
+    function sy(y) { return H / 2 - (y - cy) * scale; }
+
+    function ptsAttr(poly) {
+      return poly.map(p => `${sx(p.x).toFixed(2)},${sy(p.y).toFixed(2)}`).join(" ");
+    }
+
+    const grid = [];
+    for (let i = 0; i <= 10; i++) {
+      const gx = PAD + ((W - PAD * 2) * i / 10);
+      const gy = PAD + ((H - PAD * 2) * i / 10);
+      grid.push(`<line x1="${gx}" y1="${PAD}" x2="${gx}" y2="${H-PAD}" stroke="#e5e7eb" stroke-width="1"/>`);
+      grid.push(`<line x1="${PAD}" y1="${gy}" x2="${W-PAD}" y2="${gy}" stroke="#e5e7eb" stroke-width="1"/>`);
+    }
+
+    const layers = [];
+    layers.push(`<polygon points="${ptsAttr(allowed)}" fill="#2563eb22" stroke="#1d4ed8" stroke-width="2"/>`);
+    layers.push(`<polygon points="${ptsAttr(project)}" fill="#10b98122" stroke="#059669" stroke-width="2"/>`);
+    if (inter.length >= 3) {
+      layers.push(`<polygon points="${ptsAttr(inter)}" fill="#f59e0b66" stroke="#d97706" stroke-width="2"/>`);
+    }
+
+    const method = response?.method || "unknown";
+    const compliant = response?.compliant === true;
+    const title = `Method: ${method} | ${compliant ? "COMPLIANT" : "NON-COMPLIANT"}`;
+
+    checkVizEl.innerHTML = `${grid.join("")} ${layers.join("")} <text x="16" y="22" fill="#111827" font-size="12" font-weight="600">${title}</text>`;
+  }
+
+  function lockUI(isLocked) {
+    municipalityEl.disabled = isLocked;
+    allParcelsEl.disabled = isLocked;
+
+    // refcat state depends on checkbox + municipality
+    if (isLocked) {
+      refcatEl.disabled = true;
+    } else {
+      const hasMunicipality = !!municipalityEl.value;
+      if (!hasMunicipality) {
+        refcatEl.disabled = true;
+      } else {
+        refcatEl.disabled = allParcelsEl.checked;
+      }
+    }
+
+    generateBtn.disabled = isLocked || !canGenerate();
+    generateBtn.textContent = isLocked ? "Generating..." : "Generate IFC";
+  }
+
+  function canGenerate() {
+    const m = municipalityEl.value;
+    if (!m) return false;
+    if (allParcelsEl.checked) return true;
+    return !!refcatEl.value;
+  }
+
+  async function apiGet(url) {
+    const res = await fetch(url, { headers: { "Accept": "application/json" }});
+    if (!res.ok) {
+      const text = await res.text().catch(()=>"");
+      throw { status: res.status, text };
+    }
+    return res.json();
+  }
+
+  async function apiPost(url, body) {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Accept": "application/json", "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(()=>"");
+      throw { status: res.status, text };
+    }
+    return res.json();
+  }
+
+  function prettyServiceError(err) {
+    // WFS bakımda/HTML döndürme gibi durumlarda backend genelde 503/502 döndürür
+    if (err && (err.status === 502 || err.status === 503)) {
+      return "Service unavailable (WFS/POUM service). Try again later.";
+    }
+    if (err && err.status === 422) return "Validation error (check inputs).";
+    return "Request failed. See console for details.";
+  }
+
+  async function loadMunicipalities() {
+    setStatus("Loading municipalities...");
+    try {
+      const data = await apiGet("/municipalities");
+      municipalityEl.innerHTML = `<option value="">Select</option>`;
+      for (const m of data) {
+        const opt = document.createElement("option");
+        opt.value = m;
+        opt.textContent = m;
+        municipalityEl.appendChild(opt);
+      }
+      setStatus("");
+    } catch (e) {
+      console.error(e);
+      setStatus(prettyServiceError(e), "err");
+    }
+  }
+
+  async function loadParcels(municipality) {
+    refcatEl.innerHTML = `<option value="">Select</option>`;
+    if (!municipality) return;
+
+    refHintEl.textContent = "Loading parcels...";
+    try {
+      const list = await apiGet(`/parcels?municipality=${encodeURIComponent(municipality)}`);
+      for (const rc of list) {
+        const opt = document.createElement("option");
+        opt.value = rc;
+        opt.textContent = rc;
+        refcatEl.appendChild(opt);
+      }
+      refHintEl.textContent = list.length ? `Loaded ${list.length} parcels.` : "No parcels found.";
+    } catch (e) {
+      console.error(e);
+      refHintEl.textContent = "Failed to load parcels.";
+      setStatus(prettyServiceError(e), "err");
+    }
+  }
+
+  async function startGenerate() {
+    if (!canGenerate()) return;
+
+    // reset right panel
+    setJobState("running");
+    setProgress01(0);
+    setLogs(["Job started"]);
+    setFiles([]);
+    setStatus("");
+
+    lockUI(true);
+
+    const body = {
+      municipality: municipalityEl.value,
+      all_parcels: allParcelsEl.checked,
+      refcat: refcatEl.value || null,
+    };
+
+    try {
+      const resp = await apiPost("/generate", body);
+      currentJobId = resp.job_id;
+      setJobState("running");
+      beginPolling(currentJobId);
+    } catch (e) {
+      console.error(e);
+      setJobState("error");
+      lockUI(false);
+      setStatus(prettyServiceError(e), "err");
+    }
+  }
+
+  async function runVolumeComplianceCheck() {
+    const municipality = municipalityEl.value;
+    const refcat = refcatEl.value;
+    const architectPath = (checkArchitectIfcPathEl.value || "").trim();
+    const tolRaw = (checkToleranceEl.value || "0.01").trim();
+    const tolerance = Number(tolRaw);
+
+    if (!municipality) {
+      setCheckStatus("Select municipality first.", "err");
+      return;
+    }
+    if (!refcat) {
+      setCheckStatus("Select a cadastral reference (refcat).", "err");
+      return;
+    }
+    if (!architectPath) {
+      setCheckStatus("architect_ifc_path is required.", "err");
+      return;
+    }
+    if (!Number.isFinite(tolerance) || tolerance < 0) {
+      setCheckStatus("Tolerance must be a number >= 0.", "err");
+      return;
+    }
+
+    const body = {
+      municipality,
+      refcat,
+      architect_ifc_path: architectPath,
+      tolerance_m: tolerance,
+      keep_allowed_ifc: !!checkKeepAllowedIfcEl.checked,
+    };
+
+    checkComplianceBtn.disabled = true;
+    setCheckStatus("Running compliance check...");
+    setCheckResponse("{}");
+
+    try {
+      const res = await apiPost("/check/volume-compliance", body);
+      lastComplianceResponse = res;
+      const method = res?.method || "unknown";
+      const compliant = res?.compliant === true;
+      setCheckStatus(`Done: ${compliant ? "COMPLIANT" : "NON-COMPLIANT"} | method=${method}`, compliant ? "ok" : "err");
+      setCheckResponse(res);
+      renderComplianceViz(res);
+    } catch (e) {
+      let parsed = null;
+      try { parsed = e?.text ? JSON.parse(e.text) : null; } catch {}
+      const detail = parsed?.detail || `Request failed (status ${e?.status ?? "?"})`;
+      setCheckStatus(detail, "err");
+      setCheckResponse(parsed || (e?.text || String(e)));
+      renderComplianceViz(null);
+    } finally {
+      checkComplianceBtn.disabled = false;
+    }
+  }
+
+  function beginPolling(jobId) {
+    if (pollTimer) clearInterval(pollTimer);
+
+    pollTimer = setInterval(async () => {
+      try {
+        const st = await apiGet(`/jobs/${encodeURIComponent(jobId)}`);
+
+        setProgress01(st.progress ?? 0);
+        setLogs(st.logs || []);
+        setFiles(st.files || []);
+
+        if (st.status === "success") {
+          setJobState("success");
+          lockUI(false);
+          setStatus("Success. Files are ready.", "ok");
+          clearInterval(pollTimer);
+          pollTimer = null;
+          return;
+        }
+        if (st.status === "error") {
+          setJobState("error");
+          lockUI(false);
+          setStatus(st.message || "Job failed.", "err");
+          clearInterval(pollTimer);
+          pollTimer = null;
+          return;
+        }
+      } catch (e) {
+        console.error(e);
+        // polling error (server restart etc.)
+        setStatus("Lost connection while polling job. Try refreshing.", "err");
+        setJobState("error");
+        lockUI(false);
+        clearInterval(pollTimer);
+        pollTimer = null;
+      }
+    }, 1000);
+  }
+
+  // UI behavior wiring
+  municipalityEl.addEventListener("change", async () => {
+    const m = municipalityEl.value;
+
+    // reset selection
+    refcatEl.value = "";
+    await loadParcels(m);
+
+    // enable/disable refcat
+    const hasM = !!m;
+    if (!hasM) {
+      refcatEl.disabled = true;
+      refHintEl.textContent = "Select a municipality first.";
+    } else {
+      refcatEl.disabled = allParcelsEl.checked;
+      if (allParcelsEl.checked) refHintEl.textContent = "All parcels selected (refcat not required).";
+    }
+
+    generateBtn.disabled = !canGenerate();
+  });
+
+  allParcelsEl.addEventListener("change", () => {
+    const hasM = !!municipalityEl.value;
+
+    if (!hasM) {
+      refcatEl.disabled = true;
+      refHintEl.textContent = "Select a municipality first.";
+    } else {
+      if (allParcelsEl.checked) {
+        refcatEl.disabled = true;
+        refcatEl.value = "";
+        refHintEl.textContent = "All parcels selected (refcat not required).";
+      } else {
+        refcatEl.disabled = false;
+        refHintEl.textContent = "Pick a cadastral reference.";
+      }
+    }
+
+    generateBtn.disabled = !canGenerate();
+  });
+
+  refcatEl.addEventListener("change", () => {
+    generateBtn.disabled = !canGenerate();
+  });
+
+  generateBtn.addEventListener("click", startGenerate);
+  checkComplianceBtn.addEventListener("click", runVolumeComplianceCheck);
+
+  loadArchitect3DBtn.addEventListener("click", async () => {
+    try {
+      const url = toIfcUrl(checkArchitectIfcPathEl.value);
+      if (!url) {
+        setViewer3DStatus("Architect IFC path must point to outputs/.. or a public URL.", "err");
+        return;
+      }
+      await loadIfcInViewer(url, "architect IFC");
+    } catch (e) {
+      try {
+        await clearIfcViewer();
+        await renderComplianceFallback3D(lastComplianceResponse);
+        setViewer3DStatus("IFC viewer dependency failed; rendered fallback 3D with shared-world alignment.", "ok");
+      } catch {
+        setViewer3DStatus(`Failed to load architect IFC: ${e?.message || e}`, "err");
+      }
+    }
+  });
+
+  loadAllowed3DBtn.addEventListener("click", async () => {
+    try {
+      const allowedPath = lastComplianceResponse?.sources?.allowed_ifc;
+      const url = toIfcUrl(allowedPath);
+      if (!url) {
+        setViewer3DStatus("Run compliance check first to get allowed IFC path.", "err");
+        return;
+      }
+      await loadIfcInViewer(url, "allowed IFC");
+    } catch (e) {
+      try {
+        await clearIfcViewer();
+        await renderComplianceFallback3D(lastComplianceResponse);
+        setViewer3DStatus("IFC viewer dependency failed; rendered fallback 3D with shared-world alignment.", "ok");
+      } catch {
+        setViewer3DStatus(`Failed to load allowed IFC: ${e?.message || e}`, "err");
+      }
+    }
+  });
+
+  loadBoth3DBtn.addEventListener("click", async () => {
+    try {
+      const archUrl = toIfcUrl(checkArchitectIfcPathEl.value);
+      const allowedPath = lastComplianceResponse?.sources?.allowed_ifc;
+      const allowedUrl = toIfcUrl(allowedPath);
+      if (!archUrl) {
+        setViewer3DStatus("Architect IFC path must point to outputs/.. or a public URL.", "err");
+        return;
+      }
+      if (!allowedUrl) {
+        setViewer3DStatus("Run compliance check first to get allowed IFC path.", "err");
+        return;
+      }
+      await clearIfcViewer();
+      const a = await loadIfcInViewer(archUrl, "architect IFC");
+      const b = await loadIfcInViewer(allowedUrl, "allowed IFC");
+      if (a?.modelId == null && b?.modelId == null && lastComplianceResponse) {
+        await renderComplianceFallback3D(lastComplianceResponse);
+        setViewer3DStatus("IFC parser returned empty references; rendered fallback 3D compliance volumes.", "ok");
+      } else {
+        setViewer3DStatus("Loaded architect + allowed IFC in same scene.", "ok");
+      }
+    } catch (e) {
+      try {
+        await clearIfcViewer();
+        await renderComplianceFallback3D(lastComplianceResponse);
+        setViewer3DStatus("IFC viewer dependency failed; rendered fallback 3D with shared-world alignment.", "ok");
+      } catch {
+        setViewer3DStatus(`Failed to load both IFCs: ${e?.message || e}`, "err");
+      }
+    }
+  });
+
+  clear3DBtn.addEventListener("click", async () => {
+    await clearIfcViewer();
+  });
+
+  renderFallback3DBtn.addEventListener("click", async () => {
+    try {
+      await clearIfcViewer();
+      await renderComplianceFallback3D(lastComplianceResponse);
+      setViewer3DStatus("Rendered fallback 3D compliance volumes.", "ok");
+    } catch (e) {
+      setViewer3DStatus(`Fallback render failed: ${e?.message || e}`, "err");
+    }
+  });
+
+  // init
+  (async function init() {
+    lockUI(false);
+    await loadMunicipalities();
+    setJobState("idle");
+    setProgress01(0);
+    setLogs([]);
+    setFiles([]);
+    generateBtn.disabled = true;
+    checkArchitectIfcPathEl.value = "outputs/malgrat_000302300DG70H_23_envelope.ifc";
+    setCheckResponse("{}");
+    renderComplianceViz(null);
+    setViewer3DStatus("Viewer idle.");
+  })();
+</script>
+</body>
+</html>

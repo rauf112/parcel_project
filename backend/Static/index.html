@@ -4,6 +4,20 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>Parcel BIM/GIS Automation</title>
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://unpkg.com/three@0.135.0/build/three.module.js",
+      "three/examples/jsm/": "https://unpkg.com/three@0.135.0/examples/jsm/",
+      "web-ifc": "https://unpkg.com/web-ifc@0.0.35/web-ifc-api.js",
+      "web-ifc-three/": "https://unpkg.com/web-ifc-three@0.0.118/",
+      "three-mesh-bvh": "https://unpkg.com/three-mesh-bvh@0.5.11/src/index.js",
+      "camera-controls": "https://unpkg.com/camera-controls@1.33.1/dist/camera-controls.module.js",
+      "dat.gui": "https://unpkg.com/dat.gui@0.7.7/build/dat.gui.module.js",
+      "gsap": "https://unpkg.com/gsap@3.7.1/index.js"
+    }
+  }
+  </script>
   <style>
     :root { --border:#d9dde3; --bg:#f6f7f9; --text:#111827; --muted:#6b7280; --primary:#1f6feb; --ok:#059669; --err:#dc2626;}
     body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial; margin:0; background:var(--bg); color:var(--text); }
@@ -32,6 +46,51 @@
     .files a:hover { text-decoration:underline; }
     .small { font-size:12px; }
     .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    .viz-wrap { border:1px solid var(--border); border-radius: 10px; background:#fff; padding:10px; }
+    .viz-svg { width:100%; height:320px; display:block; background:#f9fafb; border:1px dashed #cbd5e1; border-radius:8px; }
+    .legend { display:flex; gap:14px; align-items:center; flex-wrap:wrap; margin-top:8px; }
+    .legend-item { display:flex; align-items:center; gap:6px; font-size:12px; color:var(--muted); }
+    .legend-dot { width:12px; height:12px; border-radius:3px; display:inline-block; }
+
+    /* ── Professional 3D Viewer ── */
+    .viewer-card { background:#1e1e2e; border:1px solid #2a2a3d; border-radius:12px; overflow:hidden; }
+    .viewer-card h2 { margin:0; padding:12px 16px; border-bottom:1px solid #2a2a3d; font-size:15px; color:#e2e8f0; background:#16162a; display:flex; align-items:center; gap:8px; }
+    .viewer-card h2 .badge { font-size:10px; background:#059669; color:#fff; padding:2px 8px; border-radius:99px; font-weight:700; letter-spacing:.5px; }
+
+    .v-toolbar { display:flex; flex-wrap:wrap; gap:4px; padding:8px 12px; background:#16162a; border-bottom:1px solid #2a2a3d; align-items:center; }
+    .v-toolbar .sep { width:1px; height:24px; background:#3a3a5c; margin:0 4px; }
+    .v-btn { display:inline-flex; align-items:center; gap:5px; padding:6px 10px; border-radius:6px; border:1px solid #3a3a5c; background:#2a2a44; color:#c4c9d4; font-size:12px; font-weight:600; cursor:pointer; transition: all .15s; white-space:nowrap; width:auto; }
+    .v-btn:hover { background:#3a3a5c; color:#fff; border-color:#5a5a7c; }
+    .v-btn.active { background:#1f6feb; border-color:#1f6feb; color:#fff; }
+    .v-btn.primary { background:#1f6feb; border-color:#1a5dd1; color:#fff; }
+    .v-btn.primary:hover { background:#1a5dd1; }
+    .v-btn.danger { background:#991b1b; border-color:#7f1d1d; color:#fca5a5; }
+    .v-btn.danger:hover { background:#7f1d1d; color:#fff; }
+    .v-btn svg { width:14px; height:14px; fill:currentColor; flex-shrink:0; }
+    .v-label { font-size:11px; color:#6b7280; font-weight:600; text-transform:uppercase; letter-spacing:.5px; margin-right:2px; }
+
+    .v-canvas-wrap { position:relative; width:100%; height:620px; background:#1a1a2e; }
+    .v-canvas-wrap canvas { display:block; }
+
+    .v-statusbar { display:flex; justify-content:space-between; align-items:center; padding:6px 14px; background:#16162a; border-top:1px solid #2a2a3d; font-size:11px; color:#6b7280; }
+    .v-statusbar .v-ok { color:#34d399; }
+    .v-statusbar .v-err { color:#f87171; }
+
+    .v-props-panel { position:absolute; top:0; right:0; width:320px; height:100%; background:#1a1a2eee; border-left:1px solid #2a2a3d; overflow-y:auto; z-index:10; display:none; flex-direction:column; }
+    .v-props-panel.open { display:flex; }
+    .v-props-header { display:flex; justify-content:space-between; align-items:center; padding:10px 14px; background:#16162a; border-bottom:1px solid #2a2a3d; }
+    .v-props-header span { color:#e2e8f0; font-size:13px; font-weight:700; }
+    .v-props-close { background:none; border:none; color:#9ca3af; font-size:18px; cursor:pointer; padding:2px 6px; width:auto; }
+    .v-props-close:hover { color:#fff; }
+    .v-props-body { padding:12px 14px; flex:1; overflow-y:auto; }
+    .v-props-body table { width:100%; border-collapse:collapse; font-size:11px; }
+    .v-props-body th { text-align:left; color:#9ca3af; padding:4px 6px; font-weight:600; background:#16162a; border-bottom:1px solid #2a2a3d; }
+    .v-props-body td { padding:4px 6px; color:#d1d5db; border-bottom:1px solid #1e1e30; word-break:break-all; }
+    .v-props-section { color:#60a5fa; font-size:12px; font-weight:700; margin:12px 0 6px; padding-bottom:4px; border-bottom:1px solid #2a2a3d; }
+    .v-props-empty { color:#6b7280; font-size:12px; padding:20px 0; text-align:center; }
+
+    .v-load-row { display:flex; gap:6px; padding:8px 12px; background:#121225; border-bottom:1px solid #2a2a3d; align-items:center; flex-wrap:wrap; }
+    .v-load-row .v-btn { font-size:12px; }
   </style>
 </head>
 
@@ -62,6 +121,7 @@
             <select id="refcat" disabled>
               <option value="">Select</option>
             </select>
+              <input id="refcatManual" type="text" placeholder="Or type cadastral reference manually" disabled style="margin-top:8px;" />
             <div class="small muted" id="refHint" style="margin-top:6px;">
               Select a municipality first.
             </div>
@@ -132,15 +192,87 @@
           <textarea id="checkResponse" class="mono" rows="14" readonly placeholder="Response will appear here..."></textarea>
         </div>
 
+        <div class="row" style="margin-top:12px;">
+          <div class="small muted" style="margin-bottom:6px;">Visual comparison (top view)</div>
+          <div class="viz-wrap">
+            <svg id="checkViz" class="viz-svg" viewBox="0 0 640 320" preserveAspectRatio="xMidYMid meet"></svg>
+            <div class="legend">
+              <div class="legend-item"><span class="legend-dot" style="background:#38bdf860;border:1px solid #0ea5e9;"></span>Allowed Envelope</div>
+              <div class="legend-item"><span class="legend-dot" style="background:#f05a1ecc;border:1px solid #ff8a4c;"></span>Architect Model</div>
+              <div class="legend-item"><span class="legend-dot" style="background:#f59e0b55;border:1px solid #d97706;"></span>Intersection</div>
+            </div>
+          </div>
+        </div>
+
         <div class="small muted">MVP note: method may be <span class="mono">ground_floor_perimeter_temp_volume</span> or fallback <span class="mono">bbox</span>; both are approximate checks.</div>
       </div>
     </div>
+
+    <!-- ═══════════════════ PROFESSIONAL IFC 3D VIEWER ═══════════════════ -->
+    <div class="viewer-card" style="margin-top:16px;">
+      <h2>
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="#60a5fa" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
+        IFC 3D Viewer
+        <span class="badge">BIM</span>
+      </h2>
+
+      <!-- Load buttons row -->
+      <div class="v-load-row">
+        <span class="v-label">Model:</span>
+        <button id="loadArchitect3DBtn" class="v-btn primary">&#9654; Architect</button>
+        <button id="loadAllowed3DBtn" class="v-btn primary">&#9654; Allowed</button>
+        <button id="loadBoth3DBtn" class="v-btn primary">&#9654; Both</button>
+        <button id="clear3DBtn" class="v-btn danger">&#10005; Clear</button>
+      </div>
+
+      <!-- Toolbar -->
+      <div class="v-toolbar">
+        <span class="v-label">View:</span>
+        <button id="vFitBtn" class="v-btn" title="Fit to frame">&#8690; Fit</button>
+        <button id="vFrontBtn" class="v-btn" title="Front view">F</button>
+        <button id="vTopBtn" class="v-btn" title="Top view">T</button>
+        <button id="vRightBtn" class="v-btn" title="Right view">R</button>
+        <button id="vIsoBtn" class="v-btn" title="Isometric view">3D</button>
+        <div class="sep"></div>
+        <span class="v-label">Tools:</span>
+        <button id="vClipBtn" class="v-btn" title="Toggle section plane (double-click on model to place)">&#9986; Section</button>
+        <button id="vWireBtn" class="v-btn" title="Toggle wireframe mode">&#9638; Wireframe</button>
+        <button id="vTransBtn" class="v-btn" title="Toggle transparency">&#9673; Transparent</button>
+        <div class="sep"></div>
+        <button id="vPropsBtn" class="v-btn" title="Toggle properties panel">&#9776; Properties</button>
+      </div>
+
+      <!-- Canvas + Properties Panel -->
+      <div class="v-canvas-wrap" id="ifc3DContainer">
+        <!-- Properties Panel (overlays the canvas) -->
+        <div class="v-props-panel" id="vPropsPanel">
+          <div class="v-props-header">
+            <span>Element Properties</span>
+            <button class="v-props-close" id="vPropsPanelClose">&times;</button>
+          </div>
+          <div class="v-props-body" id="vPropsBody">
+            <div class="v-props-empty">Click on a model element to inspect its properties.</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Status bar -->
+      <div class="v-statusbar">
+        <span id="viewer3DStatus">Ready</span>
+        <span id="viewerModelInfo"></span>
+      </div>
+    </div>
+
   </div>
 
-<script>
+<script type="module">
+  /* ═══════════════════════════════════════════════════════════════════════
+     ORIGINAL APP LOGIC (Generator, Compliance, Polling) — UNCHANGED
+     ═══════════════════════════════════════════════════════════════════════ */
   const municipalityEl = document.getElementById("municipality");
   const allParcelsEl = document.getElementById("allParcels");
   const refcatEl = document.getElementById("refcat");
+  const refcatManualEl = document.getElementById("refcatManual");
   const refHintEl = document.getElementById("refHint");
   const generateBtn = document.getElementById("generateBtn");
   const statusEl = document.getElementById("status");
@@ -156,131 +288,122 @@
   const checkComplianceBtn = document.getElementById("checkComplianceBtn");
   const checkStatusEl = document.getElementById("checkStatus");
   const checkResponseEl = document.getElementById("checkResponse");
+  const checkVizEl = document.getElementById("checkViz");
 
   let pollTimer = null;
   let currentJobId = null;
+  let lastComplianceResponse = null;
 
   function setStatus(msg, type="muted") {
     statusEl.className = "status " + (type === "ok" ? "ok" : type === "err" ? "err" : "muted");
     statusEl.textContent = msg || "";
   }
-
-  function setJobState(state) {
-    jobPill.textContent = state;
-  }
-
+  function setJobState(state) { jobPill.textContent = state; }
   function setProgress01(p01) {
     const pct = Math.round((p01 || 0) * 100);
     barEl.style.width = pct + "%";
     progressTextEl.textContent = pct + "%";
   }
-
   function setLogs(lines) {
-    if (!lines || !lines.length) {
-      logsEl.textContent = "(no logs)";
-      return;
-    }
+    if (!lines || !lines.length) { logsEl.textContent = "(no logs)"; return; }
     logsEl.textContent = lines.join("\n");
     logsEl.scrollTop = logsEl.scrollHeight;
   }
-
   function setFiles(files) {
-    if (!files || !files.length) {
-      filesEl.textContent = "(no files)";
-      return;
-    }
+    if (!files || !files.length) { filesEl.textContent = "(no files)"; return; }
     filesEl.innerHTML = "";
     const ul = document.createElement("ul");
-    ul.style.margin = "0";
-    ul.style.paddingLeft = "18px";
+    ul.style.margin = "0"; ul.style.paddingLeft = "18px";
     for (const f of files) {
       const li = document.createElement("li");
       const a = document.createElement("a");
-      a.href = f.download_url || "#";
-      a.textContent = f.file || f.path || "output";
-      a.target = "_blank";
-      a.rel = "noreferrer";
+      a.href = f.download_url || "#"; a.textContent = f.file || f.path || "output";
+      a.target = "_blank"; a.rel = "noreferrer";
       li.appendChild(a);
-
-      if (f.path) {
-        const p = document.createElement("div");
-        p.className = "small muted";
-        p.textContent = f.path;
-        li.appendChild(p);
-      }
+      if (f.path) { const p = document.createElement("div"); p.className = "small muted"; p.textContent = f.path; li.appendChild(p);}
       ul.appendChild(li);
     }
     filesEl.appendChild(ul);
   }
-
   function setCheckStatus(msg, type="muted") {
     checkStatusEl.className = "status " + (type === "ok" ? "ok" : type === "err" ? "err" : "muted");
     checkStatusEl.textContent = msg || "";
   }
-
   function setCheckResponse(data) {
-    try {
-      checkResponseEl.value = typeof data === "string" ? data : JSON.stringify(data, null, 2);
-    } catch {
-      checkResponseEl.value = String(data ?? "");
+    try { checkResponseEl.value = typeof data === "string" ? data : JSON.stringify(data, null, 2); }
+    catch { checkResponseEl.value = String(data ?? ""); }
+  }
+
+  function getRefcatValue() {
+    return (refcatManualEl.value || refcatEl.value || "").trim().toUpperCase();
+  }
+
+  function renderComplianceViz(response) {
+    if (!checkVizEl) return;
+    const W = 640, H = 320, PAD = 16;
+    const visual = response?.visual || {};
+    const allowedRaw = Array.isArray(visual.allowed_polygon_xy) ? visual.allowed_polygon_xy : [];
+    const projectRaw = Array.isArray(visual.project_polygon_xy) ? visual.project_polygon_xy : [];
+    const interRaw = Array.isArray(visual.intersection_polygon_xy) ? visual.intersection_polygon_xy : [];
+    const toPt = (p) => ({ x: Number(p?.x), y: Number(p?.y) });
+    let allowed = allowedRaw.map(toPt).filter(p => Number.isFinite(p.x) && Number.isFinite(p.y));
+    let project = projectRaw.map(toPt).filter(p => Number.isFinite(p.x) && Number.isFinite(p.y));
+    let inter = interRaw.map(toPt).filter(p => Number.isFinite(p.x) && Number.isFinite(p.y));
+    if (!allowed.length || !project.length) {
+      const ab = response?.allowed_bbox, pb = response?.project_bbox;
+      if (ab?.min && ab?.max && pb?.min && pb?.max) {
+        allowed = [{x:Number(ab.min.x),y:Number(ab.min.y)},{x:Number(ab.max.x),y:Number(ab.min.y)},{x:Number(ab.max.x),y:Number(ab.max.y)},{x:Number(ab.min.x),y:Number(ab.max.y)}];
+        project = [{x:Number(pb.min.x),y:Number(pb.min.y)},{x:Number(pb.max.x),y:Number(pb.min.y)},{x:Number(pb.max.x),y:Number(pb.max.y)},{x:Number(pb.min.x),y:Number(pb.max.y)}];
+      }
     }
+    const all = [...allowed,...project,...inter].filter(p => Number.isFinite(p.x) && Number.isFinite(p.y));
+    if (!all.length) { checkVizEl.innerHTML = `<text x="16" y="24" fill="#6b7280" font-size="12">No geometry to visualize.</text>`; return; }
+    const minX=Math.min(...all.map(p=>p.x)), maxX=Math.max(...all.map(p=>p.x));
+    const minY=Math.min(...all.map(p=>p.y)), maxY=Math.max(...all.map(p=>p.y));
+    const spanX=Math.max(1e-6,maxX-minX), spanY=Math.max(1e-6,maxY-minY);
+    const scale=Math.min((W-PAD*2)/spanX,(H-PAD*2)/spanY);
+    const cx=(minX+maxX)/2, cy=(minY+maxY)/2;
+    function sx(x){return W/2+(x-cx)*scale;} function sy(y){return H/2-(y-cy)*scale;}
+    function ptsAttr(poly){return poly.map(p=>`${sx(p.x).toFixed(2)},${sy(p.y).toFixed(2)}`).join(" ");}
+    const grid=[];
+    for(let i=0;i<=10;i++){const gx=PAD+((W-PAD*2)*i/10);const gy=PAD+((H-PAD*2)*i/10);grid.push(`<line x1="${gx}" y1="${PAD}" x2="${gx}" y2="${H-PAD}" stroke="#e5e7eb" stroke-width="1"/>`);grid.push(`<line x1="${PAD}" y1="${gy}" x2="${W-PAD}" y2="${gy}" stroke="#e5e7eb" stroke-width="1"/>`);}
+    const layers=[];
+    layers.push(`<polygon points="${ptsAttr(allowed)}" fill="#2563eb22" stroke="#1d4ed8" stroke-width="2"/>`);
+    layers.push(`<polygon points="${ptsAttr(project)}" fill="#10b98122" stroke="#059669" stroke-width="2"/>`);
+    if(inter.length>=3) layers.push(`<polygon points="${ptsAttr(inter)}" fill="#f59e0b66" stroke="#d97706" stroke-width="2"/>`);
+    const method=response?.method||"unknown", compliant=response?.compliant===true;
+    const title=`Method: ${method} | ${compliant?"COMPLIANT":"NON-COMPLIANT"}`;
+    checkVizEl.innerHTML = `${grid.join("")} ${layers.join("")} <text x="16" y="22" fill="#111827" font-size="12" font-weight="600">${title}</text>`;
   }
 
   function lockUI(isLocked) {
-    municipalityEl.disabled = isLocked;
-    allParcelsEl.disabled = isLocked;
-
-    // refcat state depends on checkbox + municipality
+    municipalityEl.disabled = isLocked; allParcelsEl.disabled = isLocked;
     if (isLocked) {
       refcatEl.disabled = true;
-    } else {
-      const hasMunicipality = !!municipalityEl.value;
-      if (!hasMunicipality) {
-        refcatEl.disabled = true;
-      } else {
-        refcatEl.disabled = allParcelsEl.checked;
-      }
+      refcatManualEl.disabled = true;
     }
-
+    else {
+      const hasM = !!municipalityEl.value;
+      const disableRefcat = !hasM || allParcelsEl.checked;
+      refcatEl.disabled = disableRefcat;
+      refcatManualEl.disabled = disableRefcat;
+    }
     generateBtn.disabled = isLocked || !canGenerate();
     generateBtn.textContent = isLocked ? "Generating..." : "Generate IFC";
   }
-
-  function canGenerate() {
-    const m = municipalityEl.value;
-    if (!m) return false;
-    if (allParcelsEl.checked) return true;
-    return !!refcatEl.value;
-  }
+  function canGenerate() { const m=municipalityEl.value; if(!m)return false; if(allParcelsEl.checked)return true; return !!getRefcatValue(); }
 
   async function apiGet(url) {
-    const res = await fetch(url, { headers: { "Accept": "application/json" }});
-    if (!res.ok) {
-      const text = await res.text().catch(()=>"");
-      throw { status: res.status, text };
-    }
-    return res.json();
+    const res = await fetch(url, {headers:{"Accept":"application/json"}});
+    if(!res.ok){const text=await res.text().catch(()=>"");throw {status:res.status,text};} return res.json();
   }
-
   async function apiPost(url, body) {
-    const res = await fetch(url, {
-      method: "POST",
-      headers: { "Accept": "application/json", "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
-    if (!res.ok) {
-      const text = await res.text().catch(()=>"");
-      throw { status: res.status, text };
-    }
-    return res.json();
+    const res = await fetch(url, {method:"POST",headers:{"Accept":"application/json","Content-Type":"application/json"},body:JSON.stringify(body)});
+    if(!res.ok){const text=await res.text().catch(()=>"");throw {status:res.status,text};} return res.json();
   }
-
   function prettyServiceError(err) {
-    // WFS bakımda/HTML döndürme gibi durumlarda backend genelde 503/502 döndürür
-    if (err && (err.status === 502 || err.status === 503)) {
-      return "Service unavailable (WFS/POUM service). Try again later.";
-    }
-    if (err && err.status === 422) return "Validation error (check inputs).";
+    if(err&&(err.status===502||err.status===503))return "Service unavailable (WFS/POUM service). Try again later.";
+    if(err&&err.status===422)return "Validation error (check inputs).";
     return "Request failed. See console for details.";
   }
 
@@ -289,222 +412,599 @@
     try {
       const data = await apiGet("/municipalities");
       municipalityEl.innerHTML = `<option value="">Select</option>`;
-      for (const m of data) {
-        const opt = document.createElement("option");
-        opt.value = m;
-        opt.textContent = m;
-        municipalityEl.appendChild(opt);
-      }
+      for (const m of data) { const opt=document.createElement("option"); opt.value=m; opt.textContent=m; municipalityEl.appendChild(opt); }
       setStatus("");
-    } catch (e) {
-      console.error(e);
-      setStatus(prettyServiceError(e), "err");
-    }
+    } catch (e) { console.error(e); setStatus(prettyServiceError(e),"err"); }
   }
-
   async function loadParcels(municipality) {
     refcatEl.innerHTML = `<option value="">Select</option>`;
     if (!municipality) return;
-
     refHintEl.textContent = "Loading parcels...";
     try {
       const list = await apiGet(`/parcels?municipality=${encodeURIComponent(municipality)}`);
-      for (const rc of list) {
-        const opt = document.createElement("option");
-        opt.value = rc;
-        opt.textContent = rc;
-        refcatEl.appendChild(opt);
-      }
-      refHintEl.textContent = list.length ? `Loaded ${list.length} parcels.` : "No parcels found.";
-    } catch (e) {
-      console.error(e);
-      refHintEl.textContent = "Failed to load parcels.";
-      setStatus(prettyServiceError(e), "err");
-    }
+      for (const rc of list) { const opt=document.createElement("option"); opt.value=rc; opt.textContent=rc; refcatEl.appendChild(opt); }
+      refHintEl.textContent = list.length ? `Loaded ${list.length} parcels. Pick from the list or type manually.` : "No parcels found. Type a cadastral reference manually.";
+    } catch (e) { console.error(e); refHintEl.textContent="Failed to load parcels."; setStatus(prettyServiceError(e),"err"); }
   }
 
   async function startGenerate() {
     if (!canGenerate()) return;
-
-    // reset right panel
-    setJobState("running");
-    setProgress01(0);
-    setLogs(["Job started"]);
-    setFiles([]);
-    setStatus("");
-
-    lockUI(true);
-
-    const body = {
-      municipality: municipalityEl.value,
-      all_parcels: allParcelsEl.checked,
-      refcat: refcatEl.value || null,
-    };
-
-    try {
-      const resp = await apiPost("/generate", body);
-      currentJobId = resp.job_id;
-      setJobState("running");
-      beginPolling(currentJobId);
-    } catch (e) {
-      console.error(e);
-      setJobState("error");
-      lockUI(false);
-      setStatus(prettyServiceError(e), "err");
-    }
+    setJobState("running"); setProgress01(0); setLogs(["Job started"]); setFiles([]); setStatus(""); lockUI(true);
+    const body = {municipality:municipalityEl.value, all_parcels:allParcelsEl.checked, refcat:getRefcatValue()||null};
+    try { const resp=await apiPost("/generate",body); currentJobId=resp.job_id; setJobState("running"); beginPolling(currentJobId); }
+    catch (e) { console.error(e); setJobState("error"); lockUI(false); setStatus(prettyServiceError(e),"err"); }
   }
 
   async function runVolumeComplianceCheck() {
-    const municipality = municipalityEl.value;
-    const refcat = refcatEl.value;
-    const architectPath = (checkArchitectIfcPathEl.value || "").trim();
-    const tolRaw = (checkToleranceEl.value || "0.01").trim();
-    const tolerance = Number(tolRaw);
-
-    if (!municipality) {
-      setCheckStatus("Select municipality first.", "err");
-      return;
-    }
-    if (!refcat) {
-      setCheckStatus("Select a cadastral reference (refcat).", "err");
-      return;
-    }
-    if (!architectPath) {
-      setCheckStatus("architect_ifc_path is required.", "err");
-      return;
-    }
-    if (!Number.isFinite(tolerance) || tolerance < 0) {
-      setCheckStatus("Tolerance must be a number >= 0.", "err");
-      return;
-    }
-
-    const body = {
-      municipality,
-      refcat,
-      architect_ifc_path: architectPath,
-      tolerance_m: tolerance,
-      keep_allowed_ifc: !!checkKeepAllowedIfcEl.checked,
-    };
-
-    checkComplianceBtn.disabled = true;
-    setCheckStatus("Running compliance check...");
-    setCheckResponse("{}");
-
+    const municipality=municipalityEl.value, refcat=getRefcatValue(), architectPath=(checkArchitectIfcPathEl.value||"").trim();
+    const tolRaw=(checkToleranceEl.value||"0.01").trim(), tolerance=Number(tolRaw);
+    if(!municipality){setCheckStatus("Select municipality first.","err");return;}
+    if(!refcat){setCheckStatus("Select or type a cadastral reference (refcat).","err");return;}
+    if(!architectPath){setCheckStatus("architect_ifc_path is required.","err");return;}
+    if(!Number.isFinite(tolerance)||tolerance<0){setCheckStatus("Tolerance must be a number >= 0.","err");return;}
+    const body={municipality,refcat,architect_ifc_path:architectPath,tolerance_m:tolerance,keep_allowed_ifc:!!checkKeepAllowedIfcEl.checked};
+    checkComplianceBtn.disabled=true; setCheckStatus("Running compliance check..."); setCheckResponse("{}");
     try {
-      const res = await apiPost("/check/volume-compliance", body);
-      const method = res?.method || "unknown";
-      const compliant = res?.compliant === true;
-      setCheckStatus(`Done: ${compliant ? "COMPLIANT" : "NON-COMPLIANT"} | method=${method}`, compliant ? "ok" : "err");
-      setCheckResponse(res);
+      const res=await apiPost("/check/volume-compliance",body);
+      lastComplianceResponse=res;
+      const method=res?.method||"unknown", compliant=res?.compliant===true;
+      setCheckStatus(`Done: ${compliant?"COMPLIANT":"NON-COMPLIANT"} | method=${method}`,compliant?"ok":"err");
+      setCheckResponse(res); renderComplianceViz(res);
     } catch (e) {
-      let parsed = null;
-      try { parsed = e?.text ? JSON.parse(e.text) : null; } catch {}
-      const detail = parsed?.detail || `Request failed (status ${e?.status ?? "?"})`;
-      setCheckStatus(detail, "err");
-      setCheckResponse(parsed || (e?.text || String(e)));
-    } finally {
-      checkComplianceBtn.disabled = false;
-    }
+      let parsed=null; try{parsed=e?.text?JSON.parse(e.text):null;}catch{}
+      const detail=parsed?.detail||`Request failed (status ${e?.status??"?"})`;
+      setCheckStatus(detail,"err"); setCheckResponse(parsed||(e?.text||String(e))); renderComplianceViz(null);
+    } finally { checkComplianceBtn.disabled=false; }
   }
 
   function beginPolling(jobId) {
-    if (pollTimer) clearInterval(pollTimer);
-
+    if(pollTimer)clearInterval(pollTimer);
     pollTimer = setInterval(async () => {
       try {
-        const st = await apiGet(`/jobs/${encodeURIComponent(jobId)}`);
-
-        setProgress01(st.progress ?? 0);
-        setLogs(st.logs || []);
-        setFiles(st.files || []);
-
-        if (st.status === "success") {
-          setJobState("success");
-          lockUI(false);
-          setStatus("Success. Files are ready.", "ok");
-          clearInterval(pollTimer);
-          pollTimer = null;
-          return;
-        }
-        if (st.status === "error") {
-          setJobState("error");
-          lockUI(false);
-          setStatus(st.message || "Job failed.", "err");
-          clearInterval(pollTimer);
-          pollTimer = null;
-          return;
-        }
-      } catch (e) {
-        console.error(e);
-        // polling error (server restart etc.)
-        setStatus("Lost connection while polling job. Try refreshing.", "err");
-        setJobState("error");
-        lockUI(false);
-        clearInterval(pollTimer);
-        pollTimer = null;
-      }
+        const st=await apiGet(`/jobs/${encodeURIComponent(jobId)}`);
+        setProgress01(st.progress??0); setLogs(st.logs||[]); setFiles(st.files||[]);
+        if(st.status==="success"){setJobState("success");lockUI(false);setStatus("Success. Files are ready.","ok");clearInterval(pollTimer);pollTimer=null;return;}
+        if(st.status==="error"){setJobState("error");lockUI(false);setStatus(st.message||"Job failed.","err");clearInterval(pollTimer);pollTimer=null;return;}
+      } catch(e){console.error(e);setStatus("Lost connection while polling job. Try refreshing.","err");setJobState("error");lockUI(false);clearInterval(pollTimer);pollTimer=null;}
     }, 1000);
   }
 
-  // UI behavior wiring
   municipalityEl.addEventListener("change", async () => {
-    const m = municipalityEl.value;
-
-    // reset selection
-    refcatEl.value = "";
-    await loadParcels(m);
-
-    // enable/disable refcat
-    const hasM = !!m;
-    if (!hasM) {
-      refcatEl.disabled = true;
-      refHintEl.textContent = "Select a municipality first.";
-    } else {
-      refcatEl.disabled = allParcelsEl.checked;
-      if (allParcelsEl.checked) refHintEl.textContent = "All parcels selected (refcat not required).";
-    }
-
-    generateBtn.disabled = !canGenerate();
+    const m=municipalityEl.value; refcatEl.value=""; refcatManualEl.value=""; await loadParcels(m);
+    const hasM=!!m;
+    if(!hasM){refcatEl.disabled=true;refcatManualEl.disabled=true;refHintEl.textContent="Select a municipality first.";}
+    else{const disableRefcat=allParcelsEl.checked;refcatEl.disabled=disableRefcat;refcatManualEl.disabled=disableRefcat;if(allParcelsEl.checked)refHintEl.textContent="All parcels selected (refcat not required).";}
+    generateBtn.disabled=!canGenerate();
   });
-
   allParcelsEl.addEventListener("change", () => {
-    const hasM = !!municipalityEl.value;
-
-    if (!hasM) {
-      refcatEl.disabled = true;
-      refHintEl.textContent = "Select a municipality first.";
-    } else {
-      if (allParcelsEl.checked) {
-        refcatEl.disabled = true;
-        refcatEl.value = "";
-        refHintEl.textContent = "All parcels selected (refcat not required).";
-      } else {
-        refcatEl.disabled = false;
-        refHintEl.textContent = "Pick a cadastral reference.";
-      }
-    }
-
+    const hasM=!!municipalityEl.value;
+    if(!hasM){refcatEl.disabled=true;refcatManualEl.disabled=true;refHintEl.textContent="Select a municipality first.";}
+    else{if(allParcelsEl.checked){refcatEl.disabled=true;refcatManualEl.disabled=true;refcatEl.value="";refcatManualEl.value="";refHintEl.textContent="All parcels selected (refcat not required).";}
+    else{refcatEl.disabled=false;refcatManualEl.disabled=false;refHintEl.textContent="Pick a cadastral reference or type it manually.";}}
+    generateBtn.disabled=!canGenerate();
+  });
+  refcatEl.addEventListener("change", () => { generateBtn.disabled=!canGenerate(); });
+  refcatManualEl.addEventListener("input", () => {
+    refcatManualEl.value = refcatManualEl.value.toUpperCase();
     generateBtn.disabled = !canGenerate();
   });
-
-  refcatEl.addEventListener("change", () => {
-    generateBtn.disabled = !canGenerate();
-  });
-
   generateBtn.addEventListener("click", startGenerate);
   checkComplianceBtn.addEventListener("click", runVolumeComplianceCheck);
 
-  // init
+
+  /* ═══════════════════════════════════════════════════════════════════════
+     PROFESSIONAL IFC 3D VIEWER — BIMRocket-style
+     ═══════════════════════════════════════════════════════════════════════ */
+  const ifc3DContainerEl = document.getElementById("ifc3DContainer");
+  const viewer3DStatusEl = document.getElementById("viewer3DStatus");
+  const viewerModelInfoEl = document.getElementById("viewerModelInfo");
+  const loadArchitect3DBtn = document.getElementById("loadArchitect3DBtn");
+  const loadAllowed3DBtn = document.getElementById("loadAllowed3DBtn");
+  const loadBoth3DBtn = document.getElementById("loadBoth3DBtn");
+  const clear3DBtn = document.getElementById("clear3DBtn");
+  const vFitBtn = document.getElementById("vFitBtn");
+  const vFrontBtn = document.getElementById("vFrontBtn");
+  const vTopBtn = document.getElementById("vTopBtn");
+  const vRightBtn = document.getElementById("vRightBtn");
+  const vIsoBtn = document.getElementById("vIsoBtn");
+  const vClipBtn = document.getElementById("vClipBtn");
+  const vWireBtn = document.getElementById("vWireBtn");
+  const vTransBtn = document.getElementById("vTransBtn");
+  const vPropsBtn = document.getElementById("vPropsBtn");
+  const vPropsPanel = document.getElementById("vPropsPanel");
+  const vPropsPanelClose = document.getElementById("vPropsPanelClose");
+  const vPropsBody = document.getElementById("vPropsBody");
+
+  let ifcViewer = null;
+  let loadedModelIds = [];
+  let clipperActive = false;
+  let wireframeActive = false;
+  let transparentActive = false;
+  let propsPanelOpen = false;
+  let loadedModels = [];
+  let firstModelCenter = null;  // Reference point for aligning multiple models
+
+  function setViewer3DStatus(msg, type) {
+    if (!viewer3DStatusEl) return;
+    viewer3DStatusEl.className = (type === "ok" ? "v-ok" : type === "err" ? "v-err" : "");
+    viewer3DStatusEl.textContent = msg || "";
+  }
+  function setModelInfo(msg) {
+    if (viewerModelInfoEl) viewerModelInfoEl.textContent = msg || "";
+  }
+
+  function toIfcUrl(pathLike) {
+    if (!pathLike) return null;
+    const s = String(pathLike).trim().replace(/\\/g, "/");
+    if (!s) return null;
+    if (/^https?:\/\//i.test(s)) return s;
+    if (s.startsWith("/outputs/")) return s;
+    if (s.toLowerCase().startsWith("outputs/")) return "/" + s;
+    const idx = s.toLowerCase().lastIndexOf("/outputs/");
+    if (idx >= 0) return s.slice(idx);
+    return null;
+  }
+
+  async function ensureIfcViewer() {
+    if (ifcViewer) return ifcViewer;
+
+    // Clear all children except the properties panel
+    ifc3DContainerEl.querySelectorAll(':scope > :not(.v-props-panel)').forEach(el => el.remove());
+
+    setViewer3DStatus("Initializing viewer engine...");
+    const mod = await import("https://unpkg.com/web-ifc-viewer@1.0.213/dist/ifc-viewer-api.js");
+    const IfcViewerAPI = mod.IfcViewerAPI || mod.default?.IfcViewerAPI || mod.default;
+    if (!IfcViewerAPI) throw new Error("IfcViewerAPI export not found.");
+
+    const THREE = await import("three");
+    ifcViewer = new IfcViewerAPI({
+      container: ifc3DContainerEl,
+      backgroundColor: new THREE.Color(0x1a1a2e)
+    });
+    await ifcViewer.IFC.setWasmPath("https://unpkg.com/web-ifc@0.0.35/");
+
+    try {
+      ifcViewer.IFC.loader.ifcManager.applyWebIfcConfig({
+        COORDINATE_TO_ORIGIN: true,
+        USE_FAST_BOOLS: true,
+      });
+    } catch {}
+
+    // NO built-in grid/axes — they are too large and break fitToFrame.
+    // We add a custom ground grid after each model load.
+
+    // Better lighting for building models
+    try {
+      const scene = ifcViewer.context.getScene();
+      // Remove default lights if any (except ambient)
+      const ambientLight = new THREE.AmbientLight(0xffffff, 0.5);
+      scene.add(ambientLight);
+      const dirLight1 = new THREE.DirectionalLight(0xffffff, 0.9);
+      dirLight1.position.set(50, 80, 60);
+      dirLight1.castShadow = false;
+      scene.add(dirLight1);
+      const dirLight2 = new THREE.DirectionalLight(0xffffff, 0.3);
+      dirLight2.position.set(-30, 40, -50);
+      scene.add(dirLight2);
+      const hemiLight = new THREE.HemisphereLight(0xffffff, 0x303040, 0.35);
+      scene.add(hemiLight);
+    } catch {}
+
+    // Customize pre-highlight material (blue hover)
+    try {
+      const pm = ifcViewer.IFC.selector.preselection?.material;
+      if (pm) { pm.color.setHex(0x60a5fa); pm.opacity = 0.45; pm.transparent = true; }
+    } catch {}
+
+    // Customize selection material (gold click)
+    try {
+      const sm = ifcViewer.IFC.selector.selection?.material;
+      if (sm) { sm.color.setHex(0xfbbf24); sm.opacity = 0.6; sm.transparent = true; }
+    } catch {}
+
+    // Mouse-move → hover pre-highlight
+    ifc3DContainerEl.addEventListener("mousemove", async () => {
+      try { await ifcViewer.IFC.selector.prePickIfcItem(); } catch {}
+    });
+
+    // Single click → select element + show properties
+    ifc3DContainerEl.addEventListener("click", async () => {
+      try {
+        const result = await ifcViewer.IFC.selector.pickIfcItem(true);
+        if (result && result.modelID !== undefined && result.id !== undefined) {
+          await showElementProperties(result.modelID, result.id);
+        }
+      } catch {}
+    });
+
+    // Double click → create section plane (when clipper is active)
+    ifc3DContainerEl.addEventListener("dblclick", async () => {
+      if (clipperActive && ifcViewer?.clipper) {
+        try { await ifcViewer.clipper.createPlane(); } catch {}
+      }
+    });
+
+    // Delete key removes clipper planes
+    window.addEventListener("keydown", (e) => {
+      if (e.key === "Delete" && ifcViewer?.clipper) {
+        try { ifcViewer.clipper.deletePlane(); } catch {}
+      }
+    });
+
+    setViewer3DStatus("Viewer ready", "ok");
+    return ifcViewer;
+  }
+
+  async function clearIfcViewer() {
+    if (ifcViewer) { try { ifcViewer.dispose(); } catch {} }
+    ifcViewer = null;
+    loadedModelIds = [];
+    loadedModels = [];
+    firstModelCenter = null;
+    clipperActive = false;
+    wireframeActive = false;
+    transparentActive = false;
+    vClipBtn.classList.remove("active");
+    vWireBtn.classList.remove("active");
+    vTransBtn.classList.remove("active");
+
+    ifc3DContainerEl.querySelectorAll(':scope > :not(.v-props-panel)').forEach(el => el.remove());
+    setViewer3DStatus("Ready");
+    setModelInfo("");
+    vPropsBody.innerHTML = '<div class="v-props-empty">Click on a model element to inspect its properties.</div>';
+  }
+
+  async function loadIfcInViewer(url, label) {
+    const viewer = await ensureIfcViewer();
+    setViewer3DStatus(`Loading ${label}...`);
+
+    const model = await viewer.IFC.loadIfcUrl(url);
+    const modelId = (typeof model?.modelID === "number") ? model.modelID : null;
+    if (modelId !== null) loadedModelIds.push(modelId);
+    loadedModels.push({ url, label, modelId, model });
+
+    const THREE = await import("three");
+
+    // Center models: all share the same XZ offset (from first model) to preserve relative positions
+    try {
+      model.updateMatrixWorld(true);
+      const box = new THREE.Box3().expandByObject(model);
+      if (!box.isEmpty() && isFinite(box.min.x)) {
+        if (!firstModelCenter) {
+          // First model: record the XZ center as the shared reference
+          firstModelCenter = {
+            x: (box.min.x + box.max.x) / 2,
+            z: (box.min.z + box.max.z) / 2,
+          };
+        }
+        // All models use the same XZ offset so relative positions are preserved
+        model.position.x -= firstModelCenter.x;
+        model.position.z -= firstModelCenter.z;
+        model.position.y -= box.min.y;  // ground slab bottom at Y=0
+        model.updateMatrixWorld(true);
+      }
+    } catch {}
+
+    // Style model: distinct colors per role
+    try {
+      const isAllowed = /allowed|envelope/i.test(label);
+      // Architect: vivid terracotta-orange (clearly not yellow)
+      // Allowed:   sky blue, semi-transparent (glass-box feel)
+      const mainHex   = isAllowed ? 0x38bdf8 : 0xf05a1e;
+      const mainAlpha = isAllowed ? 0.38 : 0.93;
+      const edgeHex   = isAllowed ? 0x0ea5e9 : 0xff8a4c;
+      const edgeAlpha = isAllowed ? 0.80 : 0.50;
+
+      model.traverse((obj) => {
+        if (!obj?.isMesh) return;
+        const newMat = new THREE.MeshStandardMaterial({
+          color: new THREE.Color(mainHex),
+          transparent: mainAlpha < 1,
+          opacity: mainAlpha,
+          side: THREE.DoubleSide,
+          depthWrite: mainAlpha > 0.5,
+          roughness: isAllowed ? 0.45 : 0.75,
+          metalness: isAllowed ? 0.05 : 0.0,
+        });
+        if (Array.isArray(obj.material)) {
+          obj.material.forEach(m => m.dispose?.());
+          obj.material = [newMat];
+        } else {
+          obj.material?.dispose?.();
+          obj.material = newMat;
+        }
+        if (obj.geometry) {
+          try {
+            const edges = new THREE.EdgesGeometry(obj.geometry, 25);
+            const line = new THREE.LineSegments(edges, new THREE.LineBasicMaterial({
+              color: edgeHex, transparent: true, opacity: edgeAlpha,
+            }));
+            line.userData._edgeHelper = true;
+            obj.add(line);
+          } catch {}
+        }
+      });
+    } catch {}
+
+    // Grid + camera: use BUILDING HEIGHT for camera distance (ignore wide parcel footprint)
+    try {
+      const scene = viewer.context.getScene();
+
+      const fullBox = new THREE.Box3();
+      for (const m of loadedModels) {
+        if (m.model) fullBox.expandByObject(m.model);
+      }
+
+      if (!fullBox.isEmpty() && isFinite(fullBox.min.x)) {
+        // After our Y-shift, ground slab = Y:0→1, building = Y:1→top
+        const groundH = 1.0;
+        const buildH  = Math.max(fullBox.max.y - groundH, 1.5);  // building-only height
+        const lookAtY = groundH + buildH * 0.45;                  // midpoint of building
+
+        // Camera distance from building height — NOT footprint (parcel can be 50m wide!)
+        const D = buildH * 2.5;
+
+        // 30° elevation isometric view: elevation = atan(D*0.5 / D*0.65*√2) ≈ 29°
+        const cam = viewer.context.ifcCamera.cameraControls;
+        await cam.setLookAt(
+          D * 0.65,  lookAtY + D * 0.5,  D * 0.65,
+          0,         lookAtY,             0,
+          false
+        );
+
+        // Grid at ground level, sized to parcel footprint
+        const spanX = Math.max(fullBox.max.x - fullBox.min.x, 1);
+        const spanZ = Math.max(fullBox.max.z - fullBox.min.z, 1);
+        const gs = Math.ceil(Math.max(spanX, spanZ) * 1.2);
+
+        const toRemove = [];
+        scene.traverse((c) => { if (c.userData?._customGrid || c.userData?._customAxes) toRemove.push(c); });
+        toRemove.forEach(c => { scene.remove(c); c.geometry?.dispose(); c.material?.dispose(); });
+
+        const grid = new THREE.GridHelper(gs, Math.min(gs, 40), 0x333355, 0x252540);
+        grid.position.set(0, -0.05, 0);
+        grid.userData._customGrid = true;
+        scene.add(grid);
+
+        const ax = new THREE.AxesHelper(Math.max(buildH * 0.3, 1));
+        ax.position.set(0, 0, 0);
+        ax.userData._customAxes = true;
+        scene.add(ax);
+      }
+    } catch (e) {
+      try { await viewer.context.fitToFrame(); } catch {}
+    }
+
+    const info = loadedModels.map(m => m.label).join(" + ");
+    setModelInfo(`Models: ${info}`);
+    setViewer3DStatus(`Loaded: ${label}`, "ok");
+    return { modelId };
+  }
+
+  /* ─── Element properties panel ─── */
+  function escH(s) { const d = document.createElement("div"); d.textContent = s; return d.innerHTML; }
+
+  async function showElementProperties(modelID, elementID) {
+    if (!ifcViewer) return;
+    try {
+      const props = await ifcViewer.IFC.getProperties(modelID, elementID, false, true);
+      if (!props) {
+        vPropsBody.innerHTML = '<div class="v-props-empty">No properties found for this element.</div>';
+        return;
+      }
+
+      let html = '';
+
+      // Identity section
+      html += '<div class="v-props-section">Identity</div><table>';
+      if (props.GlobalId?.value) html += `<tr><th>GlobalId</th><td>${escH(props.GlobalId.value)}</td></tr>`;
+      if (props.Name?.value) html += `<tr><th>Name</th><td>${escH(props.Name.value)}</td></tr>`;
+      if (props.type) html += `<tr><th>IFC Type</th><td>${escH(props.type)}</td></tr>`;
+      if (props.ObjectType?.value) html += `<tr><th>Object Type</th><td>${escH(props.ObjectType.value)}</td></tr>`;
+      if (props.Description?.value) html += `<tr><th>Description</th><td>${escH(props.Description.value)}</td></tr>`;
+      if (props.Tag?.value) html += `<tr><th>Tag</th><td>${escH(props.Tag.value)}</td></tr>`;
+      html += `<tr><th>Model ID</th><td>${modelID}</td></tr>`;
+      html += `<tr><th>Express ID</th><td>${elementID}</td></tr>`;
+      html += '</table>';
+
+      // PropertySets
+      const psets = props.psets;
+      if (psets && psets.length) {
+        for (const pset of psets) {
+          const setName = pset.Name?.value || "PropertySet";
+          html += `<div class="v-props-section">${escH(setName)}</div><table>`;
+          const children = pset.HasProperties || pset.Quantities || [];
+          for (const prop of children) {
+            const pName = prop.Name?.value || "?";
+            const pVal = prop.NominalValue?.value ?? prop.LengthValue?.value ?? prop.AreaValue?.value
+              ?? prop.VolumeValue?.value ?? prop.WeightValue?.value ?? prop.CountValue?.value ?? "";
+            html += `<tr><th>${escH(pName)}</th><td>${escH(String(pVal))}</td></tr>`;
+          }
+          html += '</table>';
+        }
+      }
+
+      // Materials
+      if (props.mats && props.mats.length) {
+        html += '<div class="v-props-section">Materials</div><table>';
+        for (const mat of props.mats) {
+          const matName = mat.Name?.value || mat.ForLayerSet?.Name?.value || "Material";
+          html += `<tr><th>Material</th><td>${escH(matName)}</td></tr>`;
+        }
+        html += '</table>';
+      }
+
+      vPropsBody.innerHTML = html;
+      if (!propsPanelOpen) togglePropsPanel();
+
+    } catch (e) {
+      vPropsBody.innerHTML = `<div class="v-props-empty">Error reading properties: ${escH(e?.message || String(e))}</div>`;
+    }
+  }
+
+  /* ─── Camera preset views ─── */
+  async function getSceneCenter() {
+    if (!ifcViewer || !loadedModels.length) return { center: [0, 5, 0], maxDim: 30 };
+    try {
+      const THREE = await import("three");
+      const box = new THREE.Box3();
+      for (const m of loadedModels) { if (m.model) box.expandByObject(m.model); }
+      const center = new THREE.Vector3(); box.getCenter(center);
+      const size = new THREE.Vector3(); box.getSize(size);
+      return { center: [center.x, center.y, center.z], maxDim: Math.max(size.x, size.y, size.z, 1) };
+    } catch { return { center: [0, 5, 0], maxDim: 30 }; }
+  }
+
+  async function setCameraView(position, target) {
+    if (!ifcViewer) return;
+    try {
+      const cam = ifcViewer.context.ifcCamera.cameraControls;
+      await cam.setLookAt(position[0], position[1], position[2], target[0], target[1], target[2], true);
+    } catch {
+      try {
+        const camera = ifcViewer.context.getCamera();
+        camera.position.set(position[0], position[1], position[2]);
+        camera.lookAt(target[0], target[1], target[2]);
+      } catch {}
+    }
+  }
+
+  /* ─── Toolbar handlers ─── */
+  vFitBtn.addEventListener("click", async () => {
+    if (!ifcViewer || !loadedModels.length) return;
+    const s = await getSceneCenter();
+    const d = s.maxDim * 1.5;
+    await setCameraView(
+      [s.center[0] + d, s.center[1] + d * 0.7, s.center[2] + d],
+      s.center
+    );
+  });
+
+  vFrontBtn.addEventListener("click", async () => {
+    const s = await getSceneCenter();
+    await setCameraView([s.center[0], s.center[1], s.center[2] + s.maxDim * 1.8], s.center);
+  });
+
+  vTopBtn.addEventListener("click", async () => {
+    const s = await getSceneCenter();
+    await setCameraView([s.center[0], s.center[1] + s.maxDim * 2, s.center[2] + 0.01], s.center);
+  });
+
+  vRightBtn.addEventListener("click", async () => {
+    const s = await getSceneCenter();
+    await setCameraView([s.center[0] + s.maxDim * 1.8, s.center[1], s.center[2]], s.center);
+  });
+
+  vIsoBtn.addEventListener("click", async () => {
+    const s = await getSceneCenter();
+    const d = s.maxDim * 1.2;
+    await setCameraView([s.center[0] + d, s.center[1] + d * 0.8, s.center[2] + d], s.center);
+  });
+
+  vClipBtn.addEventListener("click", () => {
+    if (!ifcViewer) return;
+    clipperActive = !clipperActive;
+    try { ifcViewer.clipper.active = clipperActive; } catch {}
+    vClipBtn.classList.toggle("active", clipperActive);
+    setViewer3DStatus(clipperActive
+      ? "Section plane ON — double-click model to place, Delete key to remove."
+      : "Section plane OFF.", "ok");
+  });
+
+  vWireBtn.addEventListener("click", () => {
+    wireframeActive = !wireframeActive;
+    vWireBtn.classList.toggle("active", wireframeActive);
+    for (const m of loadedModels) {
+      try {
+        m.model.traverse((obj) => {
+          if (!obj?.isMesh || !obj.material) return;
+          const apply = (mat) => { if(mat){ mat.wireframe = wireframeActive; mat.needsUpdate = true; } };
+          if (Array.isArray(obj.material)) obj.material.forEach(apply);
+          else apply(obj.material);
+        });
+      } catch {}
+    }
+    setViewer3DStatus(wireframeActive ? "Wireframe ON" : "Wireframe OFF", "ok");
+  });
+
+  vTransBtn.addEventListener("click", () => {
+    transparentActive = !transparentActive;
+    vTransBtn.classList.toggle("active", transparentActive);
+    for (const m of loadedModels) {
+      try {
+        m.model.traverse((obj) => {
+          if (!obj?.isMesh || !obj.material) return;
+          const apply = (mat) => {
+            if (!mat) return;
+            mat.transparent = true;
+            mat.opacity = transparentActive ? 0.35 : 1.0;
+            mat.needsUpdate = true;
+          };
+          if (Array.isArray(obj.material)) obj.material.forEach(apply);
+          else apply(obj.material);
+        });
+      } catch {}
+    }
+    setViewer3DStatus(transparentActive ? "Transparent mode ON" : "Transparent mode OFF", "ok");
+  });
+
+  function togglePropsPanel() {
+    propsPanelOpen = !propsPanelOpen;
+    vPropsPanel.classList.toggle("open", propsPanelOpen);
+    vPropsBtn.classList.toggle("active", propsPanelOpen);
+  }
+
+  vPropsBtn.addEventListener("click", togglePropsPanel);
+  vPropsPanelClose.addEventListener("click", () => {
+    propsPanelOpen = false;
+    vPropsPanel.classList.remove("open");
+    vPropsBtn.classList.remove("active");
+  });
+
+  /* ─── Load button handlers ─── */
+  loadArchitect3DBtn.addEventListener("click", async () => {
+    try {
+      const url = toIfcUrl(checkArchitectIfcPathEl.value);
+      if (!url) { setViewer3DStatus("Architect IFC path must point to outputs/.. or a public URL.", "err"); return; }
+      await loadIfcInViewer(url, "Architect");
+    } catch (e) { setViewer3DStatus(`Failed: ${e?.message || e}`, "err"); }
+  });
+
+  loadAllowed3DBtn.addEventListener("click", async () => {
+    try {
+      const allowedPath = lastComplianceResponse?.sources?.allowed_ifc;
+      const url = toIfcUrl(allowedPath);
+      if (!url) { setViewer3DStatus("Run compliance check first to get allowed IFC path.", "err"); return; }
+      await loadIfcInViewer(url, "Allowed Envelope");
+    } catch (e) { setViewer3DStatus(`Failed: ${e?.message || e}`, "err"); }
+  });
+
+  loadBoth3DBtn.addEventListener("click", async () => {
+    try {
+      const archUrl = toIfcUrl(checkArchitectIfcPathEl.value);
+      const allowedPath = lastComplianceResponse?.sources?.allowed_ifc;
+      const allowedUrl = toIfcUrl(allowedPath);
+      if (!archUrl) { setViewer3DStatus("Architect IFC path required.", "err"); return; }
+      if (!allowedUrl) { setViewer3DStatus("Run compliance check first.", "err"); return; }
+      await clearIfcViewer();
+      await loadIfcInViewer(archUrl, "Architect");
+      await loadIfcInViewer(allowedUrl, "Allowed Envelope");
+      setViewer3DStatus("Both models loaded in same scene.", "ok");
+    } catch (e) { setViewer3DStatus(`Failed: ${e?.message || e}`, "err"); }
+  });
+
+  clear3DBtn.addEventListener("click", async () => { await clearIfcViewer(); });
+
+  /* ─── Init ─── */
   (async function init() {
     lockUI(false);
     await loadMunicipalities();
-    setJobState("idle");
-    setProgress01(0);
-    setLogs([]);
-    setFiles([]);
+    setJobState("idle"); setProgress01(0); setLogs([]); setFiles([]);
     generateBtn.disabled = true;
     checkArchitectIfcPathEl.value = "outputs/malgrat_000302300DG70H_23_envelope.ifc";
     setCheckResponse("{}");
+    renderComplianceViz(null);
+    setViewer3DStatus("Ready");
   })();
 </script>
 </body>

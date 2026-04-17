@@ -352,7 +352,26 @@ def run_volume_compliance_check(
     architect_path = Path(architect_ifc_path).expanduser().resolve()
 
     allowed_bbox = _bbox_from_ifc(allowed_ifc_path)
+    allowed_polygon_xy: list[tuple[float, float]] = [
+        (allowed_bbox.min_x, allowed_bbox.min_y),
+        (allowed_bbox.max_x, allowed_bbox.min_y),
+        (allowed_bbox.max_x, allowed_bbox.max_y),
+        (allowed_bbox.min_x, allowed_bbox.max_y),
+    ]
+    allowed_height_m = 1.0
+
+    project_polygon_xy: Optional[list[tuple[float, float]]] = None
+    intersection_polygon_xy: Optional[list[tuple[float, float]]] = None
     warnings: list[str] = []
+
+    # Try to extract real footprint from allowed IFC
+    try:
+        allowed_temp_volume = _build_ground_perimeter_temp_volume(allowed_ifc_path)
+        allowed_polygon_xy = list(allowed_temp_volume["footprint_hull"])
+        allowed_height_m = float(allowed_temp_volume["height_m"])
+        warnings.append("Allowed envelope extracted from ground-floor perimeter (real geometry, not BBox).")
+    except Exception as e:
+        warnings.append(f"Allowed IFC footprint extraction failed; using BBox. reason={type(e).__name__}: {e}")
 
     try:
         temp_volume = _build_ground_perimeter_temp_volume(architect_path)
@@ -369,16 +388,21 @@ def run_volume_compliance_check(
 
         footprint_hull: list[tuple[float, float]] = temp_volume["footprint_hull"]
         height_m = float(temp_volume["height_m"])
-
-        allowed_rect = [
-            (allowed_bbox.min_x, allowed_bbox.min_y),
-            (allowed_bbox.max_x, allowed_bbox.min_y),
-            (allowed_bbox.max_x, allowed_bbox.max_y),
-            (allowed_bbox.min_x, allowed_bbox.max_y),
-        ]
+        project_polygon_xy = list(footprint_hull)
 
         project_area = _polygon_area(footprint_hull)
-        inter_poly = polygon_intersection(footprint_hull, allowed_rect)
+        inter_poly = polygon_intersection(footprint_hull, allowed_polygon_xy)
+        intersection_polygon_xy = list(inter_poly) if inter_poly else None
+        
+        # DEBUG: Log coordinate ranges to detect coordinate system mismatch
+        allowed_xs = [p[0] for p in allowed_polygon_xy]
+        allowed_ys = [p[1] for p in allowed_polygon_xy]
+        project_xs = [p[0] for p in project_polygon_xy]
+        project_ys = [p[1] for p in project_polygon_xy]
+        print(f"[COORD_DEBUG] allowed_x_range=({min(allowed_xs):.2f}, {max(allowed_xs):.2f}) "
+              f"project_x_range=({min(project_xs):.2f}, {max(project_xs):.2f})")
+        print(f"[COORD_DEBUG] allowed_y_range=({min(allowed_ys):.2f}, {max(allowed_ys):.2f}) "
+              f"project_y_range=({min(project_ys):.2f}, {max(project_ys):.2f})")
         intersection_area = _polygon_area(inter_poly) if inter_poly else 0.0
         outside_area = max(0.0, project_area - intersection_area)
 
@@ -398,6 +422,14 @@ def run_volume_compliance_check(
         project_volume = project_bbox.volume()
         intersection_volume = _intersection_volume(project_bbox, allowed_bbox)
         outside_volume = max(0.0, project_volume - intersection_volume)
+        project_polygon_xy = [
+            (project_bbox.min_x, project_bbox.min_y),
+            (project_bbox.max_x, project_bbox.min_y),
+            (project_bbox.max_x, project_bbox.max_y),
+            (project_bbox.min_x, project_bbox.max_y),
+        ]
+        inter_poly = polygon_intersection(project_polygon_xy, allowed_polygon_xy)
+        intersection_polygon_xy = list(inter_poly) if inter_poly else None
         method = "bbox"
         warnings.append(f"Ground-floor temporary volume extraction failed; fallback to bbox method. reason={type(e).__name__}: {e}")
         warnings.append("MVP bbox method: this is an approximate geometric compliance result.")
@@ -409,6 +441,9 @@ def run_volume_compliance_check(
         side: float(distance) > tolerance_value for side, distance in overflow.items()
     }
     exceeds = any(overflow_exceeds_tolerance_by_side.values())
+
+    visual_bounds_x = [allowed_bbox.min_x, allowed_bbox.max_x, project_bbox.min_x, project_bbox.max_x]
+    visual_bounds_y = [allowed_bbox.min_y, allowed_bbox.max_y, project_bbox.min_y, project_bbox.max_y]
 
     response: Dict[str, Any] = {
         "compliant": not exceeds,
@@ -435,6 +470,24 @@ def run_volume_compliance_check(
             "allowed_ifc": str(allowed_ifc_path),
             "architect_ifc": str(architect_path),
             "keep_allowed_ifc": bool(keep_allowed_ifc),
+        },
+        "visual": {
+            "view": "top_xy",
+            "allowed_polygon_xy": [
+                {"x": float(x), "y": float(y)} for x, y in (allowed_polygon_xy or [])
+            ],
+            "project_polygon_xy": [
+                {"x": float(x), "y": float(y)} for x, y in (project_polygon_xy or [])
+            ],
+            "intersection_polygon_xy": [
+                {"x": float(x), "y": float(y)} for x, y in (intersection_polygon_xy or [])
+            ],
+            "bounds": {
+                "min_x": float(min(visual_bounds_x)),
+                "max_x": float(max(visual_bounds_x)),
+                "min_y": float(min(visual_bounds_y)),
+                "max_y": float(max(visual_bounds_y)),
+            },
         },
     }
 

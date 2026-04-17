@@ -48,6 +48,10 @@
     .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
     .viz-wrap { border:1px solid var(--border); border-radius: 10px; background:#fff; padding:10px; }
     .viz-svg { width:100%; height:320px; display:block; background:#f9fafb; border:1px dashed #cbd5e1; border-radius:8px; }
+    .viz-toggle-bar { display:flex; align-items:center; gap:6px; padding:8px 10px; margin-top:6px; background:#f1f5f9; border:1px solid var(--border); border-radius:8px; }
+    .viz-toggle-label { color:#64748b; font-size:12px; font-weight:700; letter-spacing:.5px; margin-right:4px; }
+    .viz-toggle-btn { border:1px solid var(--clr,#aaa); border-radius:6px; padding:5px 14px; font-size:12px; font-weight:700; cursor:pointer; color:#fff; background:var(--clr,#555); opacity:.35; transition:opacity .15s; }
+    .viz-toggle-btn.active { opacity:1; }
     .legend { display:flex; gap:14px; align-items:center; flex-wrap:wrap; margin-top:8px; }
     .legend-item { display:flex; align-items:center; gap:6px; font-size:12px; color:var(--muted); }
     .legend-dot { width:12px; height:12px; border-radius:3px; display:inline-block; }
@@ -91,6 +95,16 @@
 
     .v-load-row { display:flex; gap:6px; padding:8px 12px; background:#121225; border-bottom:1px solid #2a2a3d; align-items:center; flex-wrap:wrap; }
     .v-load-row .v-btn { font-size:12px; }
+
+    /* ── Custom Searchable Dropdown ── */
+    .combo-wrap { position: relative; }
+    .combo-wrap input { width:100%; box-sizing:border-box; }
+    .combo-dropdown { position:absolute; left:0; right:0; top:100%; max-height:260px; overflow-y:auto; background:#fff; border:1px solid var(--border); border-top:none; border-radius:0 0 8px 8px; box-shadow:0 4px 12px rgba(0,0,0,.12); z-index:100; display:none; }
+    .combo-dropdown.open { display:block; }
+    .combo-item { padding:8px 12px; font-size:13px; cursor:pointer; border-bottom:1px solid #f3f4f6; }
+    .combo-item:hover, .combo-item.highlighted { background:#eef2ff; color:var(--primary); }
+    .combo-item.no-match { color:var(--muted); cursor:default; font-style:italic; }
+    .combo-count { padding:6px 12px; font-size:11px; color:var(--muted); background:#f9fafb; border-bottom:1px solid #eee; position:sticky; top:0; }
   </style>
 </head>
 
@@ -118,10 +132,10 @@
 
           <div class="row">
             <label for="refcat">Select cadastral reference</label>
-            <select id="refcat" disabled>
-              <option value="">Select</option>
-            </select>
-              <input id="refcatManual" type="text" placeholder="Or type cadastral reference manually" disabled style="margin-top:8px;" />
+            <div class="combo-wrap" id="comboWrap">
+              <input id="refcat" type="text" autocomplete="off" placeholder="Select or type cadastral reference" disabled />
+              <div class="combo-dropdown" id="comboDropdown"></div>
+            </div>
             <div class="small muted" id="refHint" style="margin-top:6px;">
               Select a municipality first.
             </div>
@@ -166,7 +180,11 @@
       <div class="content">
         <div class="row">
           <label for="checkArchitectIfcPath">Architect IFC path</label>
-          <input id="checkArchitectIfcPath" type="text" placeholder="outputs/architect.ifc" />
+          <div style="display:flex; gap:8px; align-items:center;">
+            <input id="checkArchitectIfcPath" type="text" placeholder="outputs/architect.ifc" style="flex:1 1 auto;" />
+            <button id="checkArchitectIfcBrowseBtn" type="button" class="btn" style="width:auto; white-space:nowrap;">Choose IFC</button>
+          </div>
+          <input id="checkArchitectIfcFile" type="file" accept=".ifc" style="display:none;" />
           <div class="small muted" style="margin-top:6px;">Path is resolved by backend. Example: outputs/malgrat_000302300DG70H_23_envelope.ifc</div>
         </div>
 
@@ -196,6 +214,12 @@
           <div class="small muted" style="margin-bottom:6px;">Visual comparison (top view)</div>
           <div class="viz-wrap">
             <svg id="checkViz" class="viz-svg" viewBox="0 0 640 320" preserveAspectRatio="xMidYMid meet"></svg>
+            <div class="viz-toggle-bar">
+              <span class="viz-toggle-label">LAYER:</span>
+              <button class="viz-toggle-btn active" data-layer="allowed" style="--clr:#2563eb;">&#9654; Allowed</button>
+              <button class="viz-toggle-btn active" data-layer="project" style="--clr:#059669;">&#9654; Architect</button>
+              <button class="viz-toggle-btn active" data-layer="intersection" style="--clr:#d97706;">&#9654; Intersection</button>
+            </div>
             <div class="legend">
               <div class="legend-item"><span class="legend-dot" style="background:#38bdf860;border:1px solid #0ea5e9;"></span>Allowed Envelope</div>
               <div class="legend-item"><span class="legend-dot" style="background:#f05a1ecc;border:1px solid #ff8a4c;"></span>Architect Model</div>
@@ -272,8 +296,9 @@
   const municipalityEl = document.getElementById("municipality");
   const allParcelsEl = document.getElementById("allParcels");
   const refcatEl = document.getElementById("refcat");
-  const refcatManualEl = document.getElementById("refcatManual");
+  const comboDropdown = document.getElementById("comboDropdown");
   const refHintEl = document.getElementById("refHint");
+  let allParcelsData = [];  // full list of refcats
   const generateBtn = document.getElementById("generateBtn");
   const statusEl = document.getElementById("status");
 
@@ -283,6 +308,8 @@
   const barEl = document.getElementById("bar");
   const progressTextEl = document.getElementById("progressText");
   const checkArchitectIfcPathEl = document.getElementById("checkArchitectIfcPath");
+  const checkArchitectIfcBrowseBtnEl = document.getElementById("checkArchitectIfcBrowseBtn");
+  const checkArchitectIfcFileEl = document.getElementById("checkArchitectIfcFile");
   const checkToleranceEl = document.getElementById("checkTolerance");
   const checkKeepAllowedIfcEl = document.getElementById("checkKeepAllowedIfc");
   const checkComplianceBtn = document.getElementById("checkComplianceBtn");
@@ -335,7 +362,7 @@
   }
 
   function getRefcatValue() {
-    return (refcatManualEl.value || refcatEl.value || "").trim().toUpperCase();
+    return (refcatEl.value || "").trim().toUpperCase();
   }
 
   function renderComplianceViz(response) {
@@ -368,25 +395,37 @@
     const grid=[];
     for(let i=0;i<=10;i++){const gx=PAD+((W-PAD*2)*i/10);const gy=PAD+((H-PAD*2)*i/10);grid.push(`<line x1="${gx}" y1="${PAD}" x2="${gx}" y2="${H-PAD}" stroke="#e5e7eb" stroke-width="1"/>`);grid.push(`<line x1="${PAD}" y1="${gy}" x2="${W-PAD}" y2="${gy}" stroke="#e5e7eb" stroke-width="1"/>`);}
     const layers=[];
-    layers.push(`<polygon points="${ptsAttr(allowed)}" fill="#2563eb22" stroke="#1d4ed8" stroke-width="2"/>`);
-    layers.push(`<polygon points="${ptsAttr(project)}" fill="#10b98122" stroke="#059669" stroke-width="2"/>`);
-    if(inter.length>=3) layers.push(`<polygon points="${ptsAttr(inter)}" fill="#f59e0b66" stroke="#d97706" stroke-width="2"/>`);
+    layers.push(`<g class="viz-layer" data-layer="allowed"><polygon points="${ptsAttr(allowed)}" fill="#2563eb22" stroke="#1d4ed8" stroke-width="2"/></g>`);
+    layers.push(`<g class="viz-layer" data-layer="project"><polygon points="${ptsAttr(project)}" fill="#10b98122" stroke="#059669" stroke-width="2"/></g>`);
+    if(inter.length>=3) layers.push(`<g class="viz-layer" data-layer="intersection"><polygon points="${ptsAttr(inter)}" fill="#f59e0b66" stroke="#d97706" stroke-width="2"/></g>`);
     const method=response?.method||"unknown", compliant=response?.compliant===true;
     const title=`Method: ${method} | ${compliant?"COMPLIANT":"NON-COMPLIANT"}`;
     checkVizEl.innerHTML = `${grid.join("")} ${layers.join("")} <text x="16" y="22" fill="#111827" font-size="12" font-weight="600">${title}</text>`;
+    // Sync toggle button states → hide layers whose buttons are inactive
+    document.querySelectorAll(".viz-toggle-btn").forEach(btn => {
+      const layer = btn.dataset.layer;
+      const g = checkVizEl.querySelector(`.viz-layer[data-layer="${layer}"]`);
+      if (g) g.style.display = btn.classList.contains("active") ? "" : "none";
+    });
   }
+
+  /* ── 2D Viz layer toggle buttons ── */
+  document.querySelectorAll(".viz-toggle-btn").forEach(btn => {
+    btn.addEventListener("click", () => {
+      btn.classList.toggle("active");
+      const layer = btn.dataset.layer;
+      const g = checkVizEl.querySelector(`.viz-layer[data-layer="${layer}"]`);
+      if (g) g.style.display = btn.classList.contains("active") ? "" : "none";
+    });
+  });
 
   function lockUI(isLocked) {
     municipalityEl.disabled = isLocked; allParcelsEl.disabled = isLocked;
-    if (isLocked) {
-      refcatEl.disabled = true;
-      refcatManualEl.disabled = true;
-    }
+    if (isLocked) { refcatEl.disabled = true; }
     else {
       const hasM = !!municipalityEl.value;
       const disableRefcat = !hasM || allParcelsEl.checked;
       refcatEl.disabled = disableRefcat;
-      refcatManualEl.disabled = disableRefcat;
     }
     generateBtn.disabled = isLocked || !canGenerate();
     generateBtn.textContent = isLocked ? "Generating..." : "Generate IFC";
@@ -399,6 +438,10 @@
   }
   async function apiPost(url, body) {
     const res = await fetch(url, {method:"POST",headers:{"Accept":"application/json","Content-Type":"application/json"},body:JSON.stringify(body)});
+    if(!res.ok){const text=await res.text().catch(()=>"");throw {status:res.status,text};} return res.json();
+  }
+  async function apiUpload(url, formData) {
+    const res = await fetch(url, {method:"POST", body:formData});
     if(!res.ok){const text=await res.text().catch(()=>"");throw {status:res.status,text};} return res.json();
   }
   function prettyServiceError(err) {
@@ -417,15 +460,60 @@
     } catch (e) { console.error(e); setStatus(prettyServiceError(e),"err"); }
   }
   async function loadParcels(municipality) {
-    refcatEl.innerHTML = `<option value="">Select</option>`;
+    allParcelsData = [];
+    comboDropdown.innerHTML = "";
+    comboDropdown.classList.remove("open");
     if (!municipality) return;
     refHintEl.textContent = "Loading parcels...";
     try {
       const list = await apiGet(`/parcels?municipality=${encodeURIComponent(municipality)}`);
-      for (const rc of list) { const opt=document.createElement("option"); opt.value=rc; opt.textContent=rc; refcatEl.appendChild(opt); }
+      allParcelsData = list;
+      renderComboItems("");
       refHintEl.textContent = list.length ? `Loaded ${list.length} parcels. Pick from the list or type manually.` : "No parcels found. Type a cadastral reference manually.";
     } catch (e) { console.error(e); refHintEl.textContent="Failed to load parcels."; setStatus(prettyServiceError(e),"err"); }
   }
+
+  /* ── Custom combo dropdown helpers ── */
+  function renderComboItems(filter) {
+    const f = filter.toUpperCase();
+    const matched = f ? allParcelsData.filter(rc => rc.toUpperCase().includes(f)) : allParcelsData;
+    let html = `<div class="combo-count">${matched.length} of ${allParcelsData.length} parcels</div>`;
+    if (matched.length === 0) {
+      html += `<div class="combo-item no-match">No matches</div>`;
+    } else {
+      for (const rc of matched) {
+        html += `<div class="combo-item" data-val="${rc}">${rc}</div>`;
+      }
+    }
+    comboDropdown.innerHTML = html;
+  }
+
+  refcatEl.addEventListener("focus", () => {
+    if (allParcelsData.length > 0 || refcatEl.value) {
+      renderComboItems(refcatEl.value);
+      comboDropdown.classList.add("open");
+    }
+  });
+
+  refcatEl.addEventListener("input", () => {
+    refcatEl.value = refcatEl.value.toUpperCase();
+    renderComboItems(refcatEl.value);
+    comboDropdown.classList.add("open");
+    generateBtn.disabled = !canGenerate();
+  });
+
+  comboDropdown.addEventListener("mousedown", (e) => {
+    const item = e.target.closest(".combo-item[data-val]");
+    if (!item) return;
+    e.preventDefault();
+    refcatEl.value = item.dataset.val;
+    comboDropdown.classList.remove("open");
+    generateBtn.disabled = !canGenerate();
+  });
+
+  refcatEl.addEventListener("blur", () => {
+    setTimeout(() => comboDropdown.classList.remove("open"), 150);
+  });
 
   async function startGenerate() {
     if (!canGenerate()) return;
@@ -457,6 +545,26 @@
     } finally { checkComplianceBtn.disabled=false; }
   }
 
+  async function uploadArchitectIfc(file) {
+    if (!file) return;
+    const formData = new FormData();
+    formData.append("file", file, file.name);
+    checkArchitectIfcBrowseBtnEl.disabled = true;
+    setCheckStatus("Uploading architect IFC...", "muted");
+    try {
+      const res = await apiUpload("/upload/architect-ifc", formData);
+      checkArchitectIfcPathEl.value = res.relative_path || res.path || "";
+      setCheckStatus(`Uploaded: ${res.file}`, "ok");
+    } catch (e) {
+      let parsed = null; try { parsed = e?.text ? JSON.parse(e.text) : null; } catch {}
+      const detail = parsed?.detail || prettyServiceError(e);
+      setCheckStatus(detail, "err");
+    } finally {
+      checkArchitectIfcBrowseBtnEl.disabled = false;
+      checkArchitectIfcFileEl.value = "";
+    }
+  }
+
   function beginPolling(jobId) {
     if(pollTimer)clearInterval(pollTimer);
     pollTimer = setInterval(async () => {
@@ -470,26 +578,26 @@
   }
 
   municipalityEl.addEventListener("change", async () => {
-    const m=municipalityEl.value; refcatEl.value=""; refcatManualEl.value=""; await loadParcels(m);
+    const m=municipalityEl.value; refcatEl.value=""; await loadParcels(m);
     const hasM=!!m;
-    if(!hasM){refcatEl.disabled=true;refcatManualEl.disabled=true;refHintEl.textContent="Select a municipality first.";}
-    else{const disableRefcat=allParcelsEl.checked;refcatEl.disabled=disableRefcat;refcatManualEl.disabled=disableRefcat;if(allParcelsEl.checked)refHintEl.textContent="All parcels selected (refcat not required).";}
+    if(!hasM){refcatEl.disabled=true;refHintEl.textContent="Select a municipality first.";}
+    else{const disableRefcat=allParcelsEl.checked;refcatEl.disabled=disableRefcat;if(allParcelsEl.checked)refHintEl.textContent="All parcels selected (refcat not required).";}
     generateBtn.disabled=!canGenerate();
   });
   allParcelsEl.addEventListener("change", () => {
     const hasM=!!municipalityEl.value;
-    if(!hasM){refcatEl.disabled=true;refcatManualEl.disabled=true;refHintEl.textContent="Select a municipality first.";}
-    else{if(allParcelsEl.checked){refcatEl.disabled=true;refcatManualEl.disabled=true;refcatEl.value="";refcatManualEl.value="";refHintEl.textContent="All parcels selected (refcat not required).";}
-    else{refcatEl.disabled=false;refcatManualEl.disabled=false;refHintEl.textContent="Pick a cadastral reference or type it manually.";}}
+    if(!hasM){refcatEl.disabled=true;refHintEl.textContent="Select a municipality first.";}
+    else{if(allParcelsEl.checked){refcatEl.disabled=true;refcatEl.value="";refHintEl.textContent="All parcels selected (refcat not required).";}
+    else{refcatEl.disabled=false;refHintEl.textContent="Pick a cadastral reference or type it manually.";}}
     generateBtn.disabled=!canGenerate();
-  });
-  refcatEl.addEventListener("change", () => { generateBtn.disabled=!canGenerate(); });
-  refcatManualEl.addEventListener("input", () => {
-    refcatManualEl.value = refcatManualEl.value.toUpperCase();
-    generateBtn.disabled = !canGenerate();
   });
   generateBtn.addEventListener("click", startGenerate);
   checkComplianceBtn.addEventListener("click", runVolumeComplianceCheck);
+  checkArchitectIfcBrowseBtnEl.addEventListener("click", () => { checkArchitectIfcFileEl.click(); });
+  checkArchitectIfcFileEl.addEventListener("change", async () => {
+    const file = checkArchitectIfcFileEl.files && checkArchitectIfcFileEl.files[0];
+    await uploadArchitectIfc(file);
+  });
 
 
   /* ═══════════════════════════════════════════════════════════════════════

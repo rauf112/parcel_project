@@ -5,7 +5,9 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 import math
 
+import numpy as np
 import ifcopenshell
+import ifcopenshell.util.placement
 
 from config import POUM_GML_PATH, OUTPUT_DIR
 from pipeline import generate_one
@@ -124,9 +126,24 @@ def _extract_world_vertices(
         if not local_points:
             continue
 
-        px, py, pz = _placement_translation(getattr(product, "ObjectPlacement", None))
+        # Use full 4x4 transform (translation + rotation) from placement chain
+        placement = getattr(product, "ObjectPlacement", None)
+        if placement is not None:
+            try:
+                matrix = ifcopenshell.util.placement.get_local_placement(placement)
+            except Exception:
+                px, py, pz = _placement_translation(placement)
+                matrix = np.eye(4)
+                matrix[0, 3] = px
+                matrix[1, 3] = py
+                matrix[2, 3] = pz
+        else:
+            matrix = np.eye(4)
+
         for lx, ly, lz in local_points:
-            world_points.append((float(lx + px), float(ly + py), float(lz + pz)))
+            pt = np.array([lx, ly, lz, 1.0])
+            wp = matrix @ pt
+            world_points.append((float(wp[0]), float(wp[1]), float(wp[2])))
 
     return world_points
 
@@ -219,11 +236,188 @@ def _is_main_building_product(product: Any) -> bool:
     return True
 
 
-def _build_ground_perimeter_temp_volume(path: Path) -> Dict[str, Any]:
+def _find_first_extrusion(node: Any) -> Any:
+    """Walk a CSG tree and return the first IfcExtrudedAreaSolid found."""
+    if node is None:
+        return None
+    try:
+        if node.is_a("IfcExtrudedAreaSolid"):
+            return node
+        if node.is_a("IfcBooleanResult") or node.is_a("IfcBooleanClippingResult"):
+            r = _find_first_extrusion(node.FirstOperand)
+            if r is not None:
+                return r
+            return _find_first_extrusion(node.SecondOperand)
+    except Exception:
+        pass
+    return None
+
+
+def _extract_envelope_profile_footprint(path: Path) -> Optional[Dict[str, Any]]:
+    """Extract the base footprint polygon from a BUILDING_ENVELOPE element.
+
+    Handles two geometry cases:
+    1. CSG (IfcBooleanResult): extracts the base IfcExtrudedAreaSolid profile.
+    2. FacetedBrep: extracts the bottom (lowest horizontal) face directly.
+
+    Returns a dict similar to _build_ground_perimeter_temp_volume or None if no
+    suitable geometry is found. This avoids the convex-hull contamination from
+    hip-roof CSG clipping planes or concave bottom-face expansion.
+    """
+    model = ifcopenshell.open(str(path))
+
+    envelope_product = None
+    for p in model.by_type("IfcBuildingElementProxy"):
+        if str(getattr(p, "ObjectType", "") or "").upper() == "BUILDING_ENVELOPE":
+            envelope_product = p
+            break
+    if envelope_product is None:
+        return None
+
+    # Get the world-transform matrix for this product
+    placement = getattr(envelope_product, "ObjectPlacement", None)
+    if placement is not None:
+        try:
+            matrix = ifcopenshell.util.placement.get_local_placement(placement)
+        except Exception:
+            px, py, pz = _placement_translation(placement)
+            matrix = np.eye(4)
+            matrix[0, 3] = px
+            matrix[1, 3] = py
+            matrix[2, 3] = pz
+    else:
+        matrix = np.eye(4)
+
+    rep = getattr(envelope_product, "Representation", None)
+    if rep is None:
+        return None
+
+    world_xy: list[tuple[float, float]] = []
+    method_label = ""
+
+    # --- Strategy 1: CSG → extract extrusion profile ---
+    extrusion = None
+    for sub_rep in rep.Representations:
+        for item in sub_rep.Items:
+            extrusion = _find_first_extrusion(item)
+            if extrusion is not None:
+                break
+        if extrusion is not None:
+            break
+
+    if extrusion is not None:
+        ext_matrix = matrix.copy()
+        ext_pos = getattr(extrusion, "Position", None)
+        if ext_pos is not None:
+            loc = getattr(ext_pos, "Location", None)
+            if loc is not None:
+                c = getattr(loc, "Coordinates", None) or []
+                pos_m = np.eye(4)
+                pos_m[0, 3] = float(c[0]) if len(c) >= 1 else 0.0
+                pos_m[1, 3] = float(c[1]) if len(c) >= 2 else 0.0
+                pos_m[2, 3] = float(c[2]) if len(c) >= 3 else 0.0
+                ext_matrix = ext_matrix @ pos_m
+
+        profile = getattr(extrusion, "SweptArea", None)
+        curve = getattr(profile, "OuterCurve", None) if profile else None
+        if curve is not None and curve.is_a("IfcPolyline"):
+            local_pts = []
+            for pt in curve.Points:
+                c = pt.Coordinates
+                local_pts.append((float(c[0]) if len(c) >= 1 else 0.0,
+                                  float(c[1]) if len(c) >= 2 else 0.0))
+            if len(local_pts) >= 2 and local_pts[0] == local_pts[-1]:
+                local_pts = local_pts[:-1]
+            if len(local_pts) >= 3:
+                for lx, ly in local_pts:
+                    wp = ext_matrix @ np.array([lx, ly, 0.0, 1.0])
+                    world_xy.append((float(wp[0]), float(wp[1])))
+                method_label = "BUILDING_ENVELOPE extrusion profile"
+
+    # --- Strategy 2: FacetedBrep → extract the lowest horizontal face ---
+    if not world_xy:
+        for sub_rep in rep.Representations:
+            for item in sub_rep.Items:
+                if not item.is_a("IfcFacetedBrep"):
+                    continue
+                best_face_pts: list[tuple[float, float]] = []
+                best_face_z = float("inf")
+                for face in item.Outer.CfsFaces:
+                    for bound in face.Bounds:
+                        loop = bound.Bound
+                        if not hasattr(loop, "Polygon"):
+                            continue
+                        pts_3d = []
+                        for pt in loop.Polygon:
+                            c = pt.Coordinates
+                            lx = float(c[0]) if len(c) >= 1 else 0.0
+                            ly = float(c[1]) if len(c) >= 2 else 0.0
+                            lz = float(c[2]) if len(c) >= 3 else 0.0
+                            wp = matrix @ np.array([lx, ly, lz, 1.0])
+                            pts_3d.append((float(wp[0]), float(wp[1]), float(wp[2])))
+                        if len(pts_3d) < 3:
+                            continue
+                        zs = [p[2] for p in pts_3d]
+                        z_range = max(zs) - min(zs)
+                        avg_z = sum(zs) / len(zs)
+                        # Horizontal face at or near the lowest Z
+                        if z_range < 0.01 and avg_z < best_face_z:
+                            best_face_z = avg_z
+                            best_face_pts = [(p[0], p[1]) for p in pts_3d]
+                if best_face_pts and len(best_face_pts) >= 3:
+                    world_xy = best_face_pts
+                    method_label = "BUILDING_ENVELOPE FacetedBrep bottom face"
+                    break
+            if world_xy:
+                break
+
+    if len(world_xy) < 3:
+        return None
+
+    # Compute height from the full model (all products except CADASTER_GROUND)
+    all_products = list(model.by_type("IfcProduct"))
+    filtered = [p for p in all_products
+                if str(getattr(p, "ObjectType", "") or "").upper() not in {"CADASTER_GROUND"}]
+    if not filtered:
+        filtered = all_products
+    all_points = _extract_world_vertices(model, filtered)
+
+    z_min = min(p[2] for p in all_points) if all_points else 0.0
+    z_max = max(p[2] for p in all_points) if all_points else 0.0
+    height = max(0.0, z_max - z_min)
+
+    xs = [p[0] for p in world_xy]
+    ys = [p[1] for p in world_xy]
+
+    return {
+        "footprint_hull": world_xy,
+        "min_x": min(xs),
+        "min_y": min(ys),
+        "max_x": max(xs),
+        "max_y": max(ys),
+        "z_min": z_min,
+        "z_max": z_max,
+        "height_m": height,
+        "ground_storey": None,
+        "sampled_vertices_ground": len(world_xy),
+        "sampled_vertices_height": len(all_points),
+        "warnings": [f"Allowed envelope footprint extracted from {method_label}."],
+    }
+
+
+def _build_ground_perimeter_temp_volume(path: Path, exclude_object_types: set[str] | None = None) -> Dict[str, Any]:
     model = ifcopenshell.open(str(path))
     warnings: list[str] = []
 
-    all_points = _extract_world_vertices(model)
+    # Filter out excluded ObjectTypes (e.g. CADASTER_GROUND)
+    all_products = list(model.by_type("IfcProduct"))
+    if exclude_object_types:
+        filtered = [p for p in all_products
+                    if str(getattr(p, "ObjectType", "") or "").upper() not in exclude_object_types]
+        if filtered:
+            all_products = filtered
+
+    all_points = _extract_world_vertices(model, all_products)
     if not all_points:
         raise RuntimeError(f"No geometric vertices could be extracted from IFC: {path}")
 
@@ -233,6 +427,9 @@ def _build_ground_perimeter_temp_volume(path: Path) -> Dict[str, Any]:
     storey_points: list[tuple[float, float, float]] = []
     if ground_storey is not None:
         storey_products = list(_iter_storey_products(ground_storey))
+        if exclude_object_types and storey_products:
+            storey_products = [p for p in storey_products
+                               if str(getattr(p, "ObjectType", "") or "").upper() not in exclude_object_types]
         if storey_products:
             storey_points = _extract_world_vertices(model, storey_products)
 
@@ -364,14 +561,48 @@ def run_volume_compliance_check(
     intersection_polygon_xy: Optional[list[tuple[float, float]]] = None
     warnings: list[str] = []
 
-    # Try to extract real footprint from allowed IFC
+    # Try to extract the base extrusion *profile* from the BUILDING_ENVELOPE element.
+    # This avoids convex-hull contamination from hip-roof CSG clipping planes.
     try:
-        allowed_temp_volume = _build_ground_perimeter_temp_volume(allowed_ifc_path)
-        allowed_polygon_xy = list(allowed_temp_volume["footprint_hull"])
-        allowed_height_m = float(allowed_temp_volume["height_m"])
-        warnings.append("Allowed envelope extracted from ground-floor perimeter (real geometry, not BBox).")
+        profile_result = _extract_envelope_profile_footprint(allowed_ifc_path)
+        if profile_result is not None:
+            allowed_polygon_xy = list(profile_result["footprint_hull"])
+            allowed_height_m = float(profile_result["height_m"])
+            warnings.extend(profile_result.get("warnings", []))
+        else:
+            # Fallback: ground perimeter convex hull (no BUILDING_ENVELOPE profile found)
+            allowed_temp_volume = _build_ground_perimeter_temp_volume(
+                allowed_ifc_path, exclude_object_types={"CADASTER_GROUND"}
+            )
+            allowed_polygon_xy = list(allowed_temp_volume["footprint_hull"])
+            allowed_height_m = float(allowed_temp_volume["height_m"])
+            warnings.append("Allowed envelope extracted from ground-floor perimeter (convex hull fallback).")
     except Exception as e:
         warnings.append(f"Allowed IFC footprint extraction failed; using BBox. reason={type(e).__name__}: {e}")
+
+    # ── Helper: align polygons when they are in different coordinate systems ──
+    def _centroid(poly):
+        n = len(poly)
+        if n == 0:
+            return (0.0, 0.0)
+        return (sum(p[0] for p in poly) / n, sum(p[1] for p in poly) / n)
+
+    def _translate_poly(poly, dx, dy):
+        return [(p[0] + dx, p[1] + dy) for p in poly]
+
+    def _bbox_of(poly):
+        xs = [p[0] for p in poly]; ys = [p[1] for p in poly]
+        return min(xs), min(ys), max(xs), max(ys)
+
+    def _polygons_overlap(poly_a, poly_b, threshold=0.1):
+        """Check if bounding boxes of two polygons overlap by at least threshold fraction."""
+        ax0, ay0, ax1, ay1 = _bbox_of(poly_a)
+        bx0, by0, bx1, by1 = _bbox_of(poly_b)
+        ox = max(0, min(ax1, bx1) - max(ax0, bx0))
+        oy = max(0, min(ay1, by1) - max(ay0, by0))
+        aw = max(1e-9, ax1 - ax0); ah = max(1e-9, ay1 - ay0)
+        overlap_ratio = (ox * oy) / (aw * ah) if (aw * ah) > 0 else 0
+        return overlap_ratio > threshold
 
     try:
         temp_volume = _build_ground_perimeter_temp_volume(architect_path)
@@ -388,13 +619,25 @@ def run_volume_compliance_check(
 
         footprint_hull: list[tuple[float, float]] = temp_volume["footprint_hull"]
         height_m = float(temp_volume["height_m"])
-        project_polygon_xy = list(footprint_hull)
 
-        project_area = _polygon_area(footprint_hull)
-        inter_poly = polygon_intersection(footprint_hull, allowed_polygon_xy)
+        # Check if polygons already overlap (same coord system) or need alignment
+        if _polygons_overlap(allowed_polygon_xy, footprint_hull):
+            project_polygon_xy = list(footprint_hull)
+            warnings.append("Polygons overlap naturally — same coordinate system detected.")
+        else:
+            # Different coordinate systems: align project centroid → allowed centroid
+            ac = _centroid(allowed_polygon_xy)
+            pc = _centroid(footprint_hull)
+            align_dx = ac[0] - pc[0]
+            align_dy = ac[1] - pc[1]
+            project_polygon_xy = _translate_poly(footprint_hull, align_dx, align_dy)
+            warnings.append(f"Different coordinate systems detected. Project polygon aligned to allowed centroid (offset: dx={align_dx:.2f}, dy={align_dy:.2f}).")
+
+        project_area = _polygon_area(project_polygon_xy)
+        inter_poly = polygon_intersection(project_polygon_xy, allowed_polygon_xy)
         intersection_polygon_xy = list(inter_poly) if inter_poly else None
         
-        # DEBUG: Log coordinate ranges to detect coordinate system mismatch
+        # DEBUG: Log coordinate ranges
         allowed_xs = [p[0] for p in allowed_polygon_xy]
         allowed_ys = [p[1] for p in allowed_polygon_xy]
         project_xs = [p[0] for p in project_polygon_xy]
@@ -422,12 +665,19 @@ def run_volume_compliance_check(
         project_volume = project_bbox.volume()
         intersection_volume = _intersection_volume(project_bbox, allowed_bbox)
         outside_volume = max(0.0, project_volume - intersection_volume)
-        project_polygon_xy = [
+        raw_project_poly = [
             (project_bbox.min_x, project_bbox.min_y),
             (project_bbox.max_x, project_bbox.min_y),
             (project_bbox.max_x, project_bbox.max_y),
             (project_bbox.min_x, project_bbox.max_y),
         ]
+        # Check overlap; align if needed
+        if _polygons_overlap(allowed_polygon_xy, raw_project_poly):
+            project_polygon_xy = raw_project_poly
+        else:
+            ac = _centroid(allowed_polygon_xy)
+            pc = _centroid(raw_project_poly)
+            project_polygon_xy = _translate_poly(raw_project_poly, ac[0] - pc[0], ac[1] - pc[1])
         inter_poly = polygon_intersection(project_polygon_xy, allowed_polygon_xy)
         intersection_polygon_xy = list(inter_poly) if inter_poly else None
         method = "bbox"

@@ -187,87 +187,57 @@ def clip_polygon_by_depth(points2: List[Point2], depth_m: float) -> List[Point2]
 
 def polygon_intersection(subject: List[Point2], clipper: List[Point2]) -> Optional[List[Point2]]:
     """
-    Intersect two polygons (subject ∩ clipper) using Sutherland–Hodgman clipping
-    where 'clipper' edges act as halfspaces. This is a best-effort implementation
-    (works well when clipper is convex). If the result is degenerate (<3 pts),
-    returns None.
+    Intersect two polygons (subject ∩ clipper) using Shapely for robust results.
+    Works correctly with both convex and concave polygons.
+    Returns the exterior ring of the largest intersection polygon, or None.
     """
+    from shapely.geometry import Polygon as ShapelyPolygon, MultiPolygon
+    from shapely.validation import make_valid
+
     subj = _ensure_ring_open(subject)
     clip = _ensure_ring_open(clipper)
 
     if len(subj) < 3 or len(clip) < 3:
         return None
 
-    def area(poly: List[Point2]) -> float:
-        a = 0.0
-        n = len(poly)
-        for i in range(n):
-            x1, y1 = poly[i]
-            x2, y2 = poly[(i + 1) % n]
-            a += (x1 * y2 - x2 * y1)
-        return 0.5 * a
+    try:
+        sp = ShapelyPolygon(subj)
+        cp = ShapelyPolygon(clip)
+        if not sp.is_valid:
+            sp = make_valid(sp)
+        if not cp.is_valid:
+            cp = make_valid(cp)
 
-    # ensure clipper is CCW for consistent inside test
-    if area(clip) < 0:
-        clip = list(reversed(clip))
+        inter = sp.intersection(cp)
 
-    def cross(ax, ay, bx, by):
-        return ax * by - ay * bx
-
-    def is_inside(p: Point2, a: Point2, b: Point2) -> bool:
-        return cross(b[0] - a[0], b[1] - a[1], p[0] - a[0], p[1] - a[1]) >= -1e-9
-
-    def intersect_seg_line(s: Point2, e: Point2, a: Point2, b: Point2) -> Optional[Point2]:
-        # line AB intersection with segment SE
-        ax, ay = a; bx, by = b
-        sx, sy = s; ex, ey = e
-        ux, uy = bx - ax, by - ay
-        vx, vy = ex - sx, ey - sy
-        denom = cross(ux, uy, -vx, -vy)
-        if abs(denom) < 1e-12:
+        if inter.is_empty:
             return None
-        t = cross(ux, uy, ax - sx, ay - sy) / denom
-        return (sx + t * vx, sy + t * vy)
 
-    output = subj
-    for i in range(len(clip)):
-        A = clip[i]
-        B = clip[(i + 1) % len(clip)]
-        input_list = output
-        output = []
-        if not input_list:
-            break
-        s = input_list[-1]
-        for e in input_list:
-            s_in = is_inside(s, A, B)
-            e_in = is_inside(e, A, B)
-            if s_in and e_in:
-                output.append(e)
-            elif s_in and not e_in:
-                ip = intersect_seg_line(s, e, A, B)
-                if ip:
-                    output.append(ip)
-            elif not s_in and e_in:
-                ip = intersect_seg_line(s, e, A, B)
-                if ip:
-                    output.append(ip)
-                output.append(e)
-            s = e
+        # Pick the largest polygon from the result
+        if inter.geom_type == "Polygon":
+            poly = inter
+        elif inter.geom_type == "MultiPolygon":
+            poly = max(inter.geoms, key=lambda g: g.area)
+        elif inter.geom_type == "GeometryCollection":
+            polys = [g for g in inter.geoms if g.geom_type == "Polygon"]
+            if not polys:
+                return None
+            poly = max(polys, key=lambda g: g.area)
+        else:
+            return None
 
-    # clean duplicates
-    def _same(a, b, tol=1e-9):
-        return abs(a[0] - b[0]) <= tol and abs(a[1] - b[1]) <= tol
+        if poly.is_empty or poly.area < 1e-12:
+            return None
 
-    cleaned = []
-    for p in output:
-        if not cleaned or not _same(p, cleaned[-1]):
-            cleaned.append(p)
+        coords = list(poly.exterior.coords)
+        # Remove closing point if present
+        if len(coords) > 1 and coords[0] == coords[-1]:
+            coords = coords[:-1]
+        if len(coords) >= 3:
+            return [(float(x), float(y)) for x, y in coords]
+    except Exception:
+        pass
 
-    if len(cleaned) >= 3:
-        if len(cleaned) >= 2 and _same(cleaned[0], cleaned[-1]):
-            cleaned = cleaned[:-1]
-        if len(cleaned) >= 3:
-            return cleaned
     return None
 
 

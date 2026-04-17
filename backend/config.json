@@ -1,7 +1,7 @@
 {
   "poum_gml_path": "POUM.gml",
   "ground_height": 1.0,
-  "default_depth_m": 3.0,
+  "default_depth_m": null,
   "force_depth_m": false,
   "debug_depth_log": true,
   "polygon_source": "both",

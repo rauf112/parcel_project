@@ -16,7 +16,7 @@ Notes
 
 from __future__ import annotations
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, UploadFile, File
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -28,6 +28,7 @@ from pathlib import Path
 import threading
 import time
 import json
+import re
 
 from config import POUM_GML_PATH, OUTPUT_DIR, DEFAULT_MUNICIPALITIES
 from jobs import create_job, get_job, append_log, Job
@@ -139,6 +140,30 @@ def _load_backend_config() -> Dict[str, Any]:
         return data if isinstance(data, dict) else {}
     except Exception:
         return {}
+
+
+@app.post("/upload/architect-ifc")
+async def upload_architect_ifc(file: UploadFile = File(...)) -> Dict[str, str]:
+    filename = Path(file.filename or "architect.ifc").name
+    if Path(filename).suffix.lower() != ".ifc":
+        raise HTTPException(status_code=400, detail="Only .ifc files are supported")
+
+    safe_stem = re.sub(r"[^A-Za-z0-9._-]+", "_", Path(filename).stem).strip("._") or "architect"
+    safe_name = f"{safe_stem}_{int(time.time())}.ifc"
+    upload_dir = OUTPUT_DIR / "uploads"
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    output_path = upload_dir / safe_name
+
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="Uploaded file is empty")
+
+    output_path.write_bytes(content)
+    return {
+        "file": safe_name,
+        "path": str(output_path),
+        "relative_path": f"outputs/uploads/{safe_name}",
+    }
 
 
 def run_simplify_cadastre_job(

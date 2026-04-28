@@ -32,6 +32,7 @@ import ifcopenshell
 import ifcopenshell.guid
 
 Point2 = Tuple[float, float]
+StreetSegment = Dict[str, Any]
 
 
 
@@ -63,6 +64,37 @@ def _to_local_xy(points: List[Point2]) -> Tuple[List[Point2], Tuple[float, float
     return local, (minx, miny)
 
 
+def _to_local_street_segments(street_segments: Optional[List[StreetSegment]], ox: float, oy: float) -> List[StreetSegment]:
+    """Translate segment coordinates into the same local XY system as the footprint."""
+    localized: List[StreetSegment] = []
+    for seg in street_segments or []:
+        if not isinstance(seg, dict):
+            continue
+        segment_pair = seg.get("segment")
+        if not isinstance(segment_pair, (list, tuple)) or len(segment_pair) != 2:
+            continue
+        start, end = segment_pair
+        if not isinstance(start, (list, tuple)) or not isinstance(end, (list, tuple)):
+            continue
+        if len(start) < 2 or len(end) < 2:
+            continue
+        try:
+            x1 = float(start[0]) - ox
+            y1 = float(start[1]) - oy
+            x2 = float(end[0]) - ox
+            y2 = float(end[1]) - oy
+            localized_segment: StreetSegment = {
+                "segment": [(x1, y1), (x2, y2)],
+                "length": float(seg.get("length")) if seg.get("length") is not None else math.hypot(x2 - x1, y2 - y1),
+            }
+            if seg.get("street") is not None:
+                localized_segment["street"] = float(seg.get("street"))
+        except Exception:
+            continue
+        localized.append(localized_segment)
+    return localized
+
+
 def _unit(vx: float, vy: float) -> Tuple[float, float]:
     """Return unit vector of (vx,vy)."""
     L = math.hypot(vx, vy)
@@ -92,6 +124,85 @@ def _pick_ridge_dir_longest_edge(pts: List[Point2]) -> Tuple[float, float]:
             best = _unit(vx, vy)
 
     return best
+
+
+def _pick_ridge_dir_from_street_segments(street_segments: Optional[List[StreetSegment]]) -> Optional[Tuple[float, float]]:
+    """
+    Infer ridge direction from street-facing parcel edges.
+
+    Segment orientations are treated as undirected lines. We group near-parallel
+    edges and bias the vote toward longer edges with larger street-clearance
+    values, which makes opposite street frontages dominate over parcel-to-parcel
+    gaps. Returns None when frontage data is absent or inconclusive.
+    """
+    groups: List[Dict[str, Any]] = []
+    parallel_cos = math.cos(math.radians(20.0))
+
+    for seg in street_segments or []:
+        if not isinstance(seg, dict):
+            continue
+        segment_pair = seg.get("segment")
+        if not isinstance(segment_pair, (list, tuple)) or len(segment_pair) != 2:
+            continue
+
+        street_value = seg.get("street")
+        if street_value is None:
+            continue
+
+        try:
+            street = float(street_value)
+            (x1, y1), (x2, y2) = segment_pair
+            vx = float(x2) - float(x1)
+            vy = float(y2) - float(y1)
+        except Exception:
+            continue
+
+        length = float(seg.get("length")) if seg.get("length") is not None else math.hypot(vx, vy)
+        if street <= 0.5 or length <= 0.5:
+            continue
+
+        ux, uy = _unit(vx, vy)
+        if ux < -1e-9 or (abs(ux) <= 1e-9 and uy < 0.0):
+            ux, uy = -ux, -uy
+
+        weight = length * street * street
+        best_group = None
+        best_dot = -1.0
+        for group in groups:
+            dot = abs(ux * group["dir"][0] + uy * group["dir"][1])
+            if dot > best_dot:
+                best_dot = dot
+                best_group = group
+
+        if best_group is not None and best_dot >= parallel_cos:
+            sign = 1.0 if (ux * best_group["vec"][0] + uy * best_group["vec"][1]) >= 0.0 else -1.0
+            best_group["vec"][0] += sign * ux * weight
+            best_group["vec"][1] += sign * uy * weight
+            best_group["score"] += weight
+            best_group["dir"] = _unit(best_group["vec"][0], best_group["vec"][1])
+            continue
+
+        groups.append(
+            {
+                "vec": [ux * weight, uy * weight],
+                "dir": (ux, uy),
+                "score": weight,
+            }
+        )
+
+    if not groups:
+        return None
+
+    best_group = max(groups, key=lambda group: float(group["score"]))
+    return _unit(best_group["vec"][0], best_group["vec"][1])
+
+
+def _pick_ridge_dir(pts: List[Point2], street_segments: Optional[List[StreetSegment]] = None) -> Tuple[float, float]:
+    """Prefer frontage-driven orientation and fall back to the longest footprint edge."""
+    street_dir = _pick_ridge_dir_from_street_segments(street_segments)
+    if street_dir is not None:
+        return street_dir
+    return _pick_ridge_dir_longest_edge(pts)
 
 
 def clip_polygon_by_depth(points2: List[Point2], depth_m: float) -> List[Point2]:
@@ -693,7 +804,14 @@ def _clip_intersections(model, base, halfspaces):
 # Roof logic (HIP roof)
 # =============================================================================
 
-def _hip_roof_halfspaces(model, pts2: List[Point2], h_eaves: float, slope_deg: float, max_rise_m: Optional[float] = None):
+def _hip_roof_halfspaces(
+    model,
+    pts2: List[Point2],
+    h_eaves: float,
+    slope_deg: float,
+    max_rise_m: Optional[float] = None,
+    street_segments: Optional[List[StreetSegment]] = None,
+):
     """
     Build 4 roof planes for a hip roof:
     - 2 planes along ridge-perpendicular axis (S)
@@ -707,7 +825,7 @@ def _hip_roof_halfspaces(model, pts2: List[Point2], h_eaves: float, slope_deg: f
     t = math.tan(math.radians(slope_deg))
 
     # Ridge direction from real footprint
-    rx, ry = _pick_ridge_dir_longest_edge(pts2)
+    rx, ry = _pick_ridge_dir(pts2, street_segments)
     # Perpendicular
     sx, sy = (-ry, rx)
 
@@ -758,11 +876,16 @@ def _hip_roof_halfspaces(model, pts2: List[Point2], h_eaves: float, slope_deg: f
 # Public API
 # =============================================================================
 
-def _compute_rise_max(pts2: List[Point2], slope_deg: float, max_rise_m: Optional[float] = None) -> float:
+def _compute_rise_max(
+    pts2: List[Point2],
+    slope_deg: float,
+    max_rise_m: Optional[float] = None,
+    street_segments: Optional[List[StreetSegment]] = None,
+) -> float:
     """Compute hip-roof max ridge rise. Pure Python, no IFC entities needed."""
     pts2 = _ensure_ring_open(pts2)
     t = math.tan(math.radians(float(slope_deg)))
-    rx, ry = _pick_ridge_dir_longest_edge(pts2)
+    rx, ry = _pick_ridge_dir(pts2, street_segments)
     sx, sy = (-ry, rx)
     proj_r = [x * rx + y * ry for (x, y) in pts2]
     proj_s = [x * sx + y * sy for (x, y) in pts2]
@@ -772,6 +895,28 @@ def _compute_rise_max(pts2: List[Point2], slope_deg: float, max_rise_m: Optional
     if max_rise_m is not None:
         rise = min(rise, float(max_rise_m))
     return float(rise)
+
+
+def _make_hip_roof_clipped_solid(
+    model: ifcopenshell.file,
+    profile,
+    pts2: List[Point2],
+    h_eaves: float,
+    slope_deg: float,
+    max_rise_m: Optional[float] = None,
+    street_segments: Optional[List[StreetSegment]] = None,
+):
+    """Build a frontage-aware hip roof by clipping a tall prism with four roof planes."""
+    halfspaces, rise = _hip_roof_halfspaces(
+        model,
+        pts2,
+        h_eaves=h_eaves,
+        slope_deg=slope_deg,
+        max_rise_m=max_rise_m,
+        street_segments=street_segments,
+    )
+    base = _make_extruded_solid(model, profile, depth=float(h_eaves + rise))
+    return _clip_intersections(model, base, halfspaces), float(rise)
 
 
 def _build_envelope_brep(
@@ -848,6 +993,155 @@ def _build_envelope_brep(
     return model.create_entity("IfcFacetedBrep", Outer=face_set)
 
 
+def _build_envelope_brep_ridge(
+    model: ifcopenshell.file,
+    pts2: List[Point2],
+    h_bottom: float,
+    h_eaves: float,
+    slope_deg: float,
+    ridge_dir: Tuple[float, float],
+    max_rise_m: Optional[float] = None,
+    include_bottom_face: bool = True,
+) -> Tuple[object, float]:
+    """
+    Hip-roof brep with a real ridge segment (not a single apex point).
+
+    The ridge is aligned with `ridge_dir`. Its endpoints lie on the medial line
+    of the footprint's projected bbox, shrunk on both ends by half the cross
+    span so the hip ends close cleanly. Each footprint vertex is connected to
+    the closest point on the ridge segment, producing a hip roof for
+    rectangular-ish parcels and a robust fan for irregular ones.
+
+    Returns the IfcFacetedBrep and the actual ridge rise (h_top - h_eaves).
+    """
+    from shapely.geometry import Polygon as _SP
+
+    pts2 = _ensure_ring_open(pts2)
+    n = len(pts2)
+    if n < 3:
+        # Degenerate: fall back to flat top
+        return _build_envelope_brep(
+            model, pts2, h_bottom, h_eaves, h_eaves, include_bottom_face
+        ), 0.0
+
+    sp = _SP(pts2)
+    if sp.exterior.is_ccw:
+        ring = [(float(x), float(y)) for x, y in pts2]
+    else:
+        ring = [(float(x), float(y)) for x, y in reversed(pts2)]
+
+    rx, ry = _unit(float(ridge_dir[0]), float(ridge_dir[1]))
+    sx, sy = (-ry, rx)
+
+    proj_r = [p[0] * rx + p[1] * ry for p in ring]
+    proj_s = [p[0] * sx + p[1] * sy for p in ring]
+    r_min, r_max = min(proj_r), max(proj_r)
+    s_min, s_max = min(proj_s), max(proj_s)
+    half_s = 0.5 * (s_max - s_min)
+    half_r = 0.5 * (r_max - r_min)
+    s_c = 0.5 * (s_min + s_max)
+
+    t = math.tan(math.radians(float(slope_deg)))
+    rise = half_s * t
+    if max_rise_m is not None and rise > float(max_rise_m):
+        rise = float(max_rise_m)
+    h_top = h_eaves + rise
+
+    # Ridge endpoints along the requested ridge axis.
+    #
+    # - If the ridge axis is the LONG axis of the footprint (half_r >= half_s),
+    #   inset the ridge by half_s on each end to produce a true hip roof whose
+    #   hip-end faces match the long-side slope.
+    # - If the ridge axis is the SHORT axis (half_r < half_s, which is the
+    #   typical "street on the short edge" case), use the full ridge span and
+    #   let the end faces be vertical gables. This still enforces the
+    #   "ridge parallel to street" rule and avoids collapsing to a single
+    #   apex pyramid.
+    if half_r >= half_s:
+        inset = half_s
+    else:
+        inset = 0.0
+    r_lo = r_min + inset
+    r_hi = r_max - inset
+    if r_lo > r_hi:
+        # Degenerate: collapse to a single apex point on the medial line.
+        r_lo = r_hi = 0.5 * (r_min + r_max)
+
+    def _ridge_xy(rp: float) -> Tuple[float, float]:
+        rp_c = max(r_lo, min(r_hi, rp))
+        return (rp_c * rx + s_c * sx, rp_c * ry + s_c * sy)
+
+    def _apex_for(p: Tuple[float, float]) -> Tuple[float, float, float]:
+        rp = p[0] * rx + p[1] * ry
+        ax, ay = _ridge_xy(rp)
+        return (ax, ay, h_top)
+
+    def _pt(x, y, z):
+        return model.create_entity(
+            "IfcCartesianPoint", Coordinates=(float(x), float(y), float(z))
+        )
+
+    def _face(*verts):
+        loop = model.create_entity("IfcPolyLoop", Polygon=[_pt(*v) for v in verts])
+        bound = model.create_entity("IfcFaceOuterBound", Bound=loop, Orientation=True)
+        return model.create_entity("IfcFace", Bounds=[bound])
+
+    faces = []
+    has_walls = abs(h_eaves - h_bottom) > 1e-6
+    has_roof = rise > 1e-6
+
+    if include_bottom_face:
+        faces.append(
+            _face(*[(ring[i][0], ring[i][1], h_bottom) for i in range(n - 1, -1, -1)])
+        )
+
+    if has_walls:
+        for i in range(n):
+            j = (i + 1) % n
+            faces.append(
+                _face(
+                    (ring[i][0], ring[i][1], h_bottom),
+                    (ring[j][0], ring[j][1], h_bottom),
+                    (ring[j][0], ring[j][1], h_eaves),
+                    (ring[i][0], ring[i][1], h_eaves),
+                )
+            )
+
+    if has_roof:
+        for i in range(n):
+            j = (i + 1) % n
+            ai = _apex_for(ring[i])
+            aj = _apex_for(ring[j])
+            same_apex = (
+                abs(ai[0] - aj[0]) < 1e-6
+                and abs(ai[1] - aj[1]) < 1e-6
+                and abs(ai[2] - aj[2]) < 1e-6
+            )
+            if same_apex:
+                faces.append(
+                    _face(
+                        (ring[i][0], ring[i][1], h_eaves),
+                        (ring[j][0], ring[j][1], h_eaves),
+                        ai,
+                    )
+                )
+            else:
+                faces.append(
+                    _face(
+                        (ring[i][0], ring[i][1], h_eaves),
+                        (ring[j][0], ring[j][1], h_eaves),
+                        aj,
+                        ai,
+                    )
+                )
+    else:
+        faces.append(_face(*[(ring[i][0], ring[i][1], h_eaves) for i in range(n)]))
+
+    face_set = model.create_entity("IfcConnectedFaceSet", CfsFaces=faces)
+    brep = model.create_entity("IfcFacetedBrep", Outer=face_set)
+    return brep, float(rise)
+
+
 def create_ifc_envelope(
     footprint_points: List[Point2],
     height: float,
@@ -859,7 +1153,9 @@ def create_ifc_envelope(
     depth_m: Optional[float] = None,
     max_roof_rise_m: Optional[float] = None,
     ground_footprint_points=None,
+    include_cadaster_ground: bool = True,
     street_metrics: Optional[Dict[str, Any]] = None,
+    street_segments: Optional[List[StreetSegment]] = None,
 ):
     """
     Create one IFC representing the parcel envelope.
@@ -876,6 +1172,9 @@ def create_ifc_envelope(
         If None -> simple extrusion.
     roof_slope_deg_virtual:
         Stored only as metadata for now.
+    include_cadaster_ground:
+        If true, add the parcel ground proxy at Z=-1..0. Disable this for
+        viewer/comparison IFCs that should align on the actual building base.
     """
     model = ifcopenshell.file(schema="IFC4X3")
 
@@ -899,20 +1198,22 @@ def create_ifc_envelope(
     ground_fp = ground_footprint_points or footprint_points
     ground_pts2_local, (gox, goy) = _to_local_xy(ground_fp)
 
-    # 1) Cadastre ground (always create, parcel footprint, fixed -1..0 Z range)
-    create_ground_volume(
-        model=model,
-        context=context,
-        storey=storey,
-        pts2_local=ground_pts2_local,
-        ox=gox, oy=goy,
-        z_dir=z_dir, x_dir=x_dir,
-        ground_height=float(ground_height),
-        layer_name="CADASTER_GROUND",
-    )
+    if include_cadaster_ground:
+        # 1) Cadastre ground (parcel footprint, fixed -1..0 Z range)
+        create_ground_volume(
+            model=model,
+            context=context,
+            storey=storey,
+            pts2_local=ground_pts2_local,
+            ox=gox, oy=goy,
+            z_dir=z_dir, x_dir=x_dir,
+            ground_height=float(ground_height),
+            layer_name="CADASTER_GROUND",
+        )
 
     # Use envelope footprint from here on
     pts2_local = env_pts2_local
+    street_segments_local = _to_local_street_segments(street_segments, ox, oy)
 
     # Buildable footprint: clip by maximum depth (PROFEDIF) if provided.
     if depth_m is not None and depth_m > 0.0:
@@ -971,12 +1272,20 @@ def create_ifc_envelope(
         )
 
     else:
-        # Hip-roof envelope as IfcFacetedBrep (pure Python, no CSG/geom kernel)
-        rise = _compute_rise_max(pts2_buildable, float(roof_slope_deg_real), max_roof_rise_m)
-        h_max = h_eaves + rise
-        envelope_brep = _build_envelope_brep(
-            model, pts2_buildable,
-            h_bottom=0.0, h_eaves=h_eaves, h_top=h_max,
+        # Frontage-aware hip-roof envelope as IfcFacetedBrep with a real ridge
+        # segment. Brep is used (instead of CSG clipping) for maximum viewer
+        # compatibility (web-ifc renders breps reliably; chained boolean
+        # clipping can fragment).
+        ridge_dir = _pick_ridge_dir(pts2_buildable, street_segments_local)
+        envelope_brep, _ = _build_envelope_brep_ridge(
+            model,
+            pts2_buildable,
+            h_bottom=0.0,
+            h_eaves=h_eaves,
+            slope_deg=float(roof_slope_deg_real),
+            ridge_dir=ridge_dir,
+            max_rise_m=max_roof_rise_m,
+            include_bottom_face=True,
         )
         shape_rep = model.create_entity(
             "IfcShapeRepresentation",
@@ -986,6 +1295,8 @@ def create_ifc_envelope(
             Items=[envelope_brep],
         )
         _assign_layer(model, shape_rep.Items, "REAL_ENVELOPE")
+        # Sky-blue, mostly opaque so the real envelope reads as the primary mass.
+        _style_item(model, envelope_brep, rgb=(0.22, 0.74, 0.97), transparency=0.30, name="RealEnvelopeStyle")
 
 
     # Assign shape
@@ -1004,19 +1315,26 @@ def create_ifc_envelope(
             ObjectType="VIRTUAL_ROOF",
         )
 
-        # Same placement offset (so it sits exactly on the footprint)
-        _place_proxy_at_offset(model, virtual_proxy, ox, oy, 0.0, z_dir, x_dir)
+        # Place the virtual roof at eaves level so local Z=0 is the roof spring line.
+        _place_proxy_at_offset(model, virtual_proxy, ox, oy, h_eaves, z_dir, x_dir)
         _attach_proxy_to_storey(model, storey, virtual_proxy)
 
         # Optional: also store both constraints on the virtual element
         _add_pset_roof_slopes(model, virtual_proxy, roof_slope_deg_real, roof_slope_deg_virtual)
 
-        # Virtual roof as IfcFacetedBrep pyramid (roof portion only, h_eaves → apex)
-        rise_v = _compute_rise_max(pts2_buildable, float(roof_slope_deg_virtual), max_roof_rise_m)
-        h_max_v = h_eaves + rise_v
-        roof_brep_v = _build_envelope_brep(
-            model, pts2_buildable,
-            h_bottom=h_eaves, h_eaves=h_eaves, h_top=h_max_v,
+        # Virtual roof (regulatory pyramid) as a ridge-aware brep, local to
+        # the eaves plane. No walls (h_bottom == h_eaves) so only the roof
+        # surfaces are emitted.
+        ridge_dir_v = _pick_ridge_dir(pts2_buildable, street_segments_local)
+        roof_brep_v, _ = _build_envelope_brep_ridge(
+            model,
+            pts2_buildable,
+            h_bottom=0.0,
+            h_eaves=0.0,
+            slope_deg=float(roof_slope_deg_virtual),
+            ridge_dir=ridge_dir_v,
+            max_rise_m=max_roof_rise_m,
+            include_bottom_face=True,
         )
         virtual_shape_rep = model.create_entity(
             "IfcShapeRepresentation",
@@ -1026,6 +1344,9 @@ def create_ifc_envelope(
             Items=[roof_brep_v],
         )
         _assign_layer(model, virtual_shape_rep.Items, "VIRTUAL_ROOF")
+        # Same hue as the real envelope, but more transparent so the virtual roof
+        # still reads as a secondary regulatory hint in the viewer.
+        _style_item(model, roof_brep_v, rgb=(0.22, 0.74, 0.97), transparency=0.65, name="VirtualRoofStyle")
 
         virtual_proxy.Representation = model.create_entity(
             "IfcProductDefinitionShape",

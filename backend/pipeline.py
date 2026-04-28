@@ -297,17 +297,38 @@ def _load_preprocessed_parcel_geometry(refcat: str, config: Dict[str, Any]) -> O
     if len(points) < 3:
         return None
 
-    segments = parcel.get("segments")
-    segment_count = len(segments) if isinstance(segments, list) else 0
+    raw_segments = parcel.get("segments")
+    street_segments: List[Dict[str, Any]] = []
+    segment_count = len(raw_segments) if isinstance(raw_segments, list) else 0
     street_values: List[float] = []
-    if isinstance(segments, list):
-        for seg in segments:
+    if isinstance(raw_segments, list):
+        for seg in raw_segments:
             if not isinstance(seg, dict):
                 continue
-            if "street" not in seg:
+            segment_pair = seg.get("segment")
+            if not isinstance(segment_pair, list) or len(segment_pair) != 2:
                 continue
             try:
-                street_values.append(float(seg.get("street")))
+                start = segment_pair[0]
+                end = segment_pair[1]
+                if not isinstance(start, (list, tuple)) or not isinstance(end, (list, tuple)):
+                    continue
+                if len(start) < 2 or len(end) < 2:
+                    continue
+                street_value = float(seg.get("street")) if "street" in seg and seg.get("street") is not None else None
+                length_value = float(seg.get("length")) if seg.get("length") is not None else None
+                normalized_segment: Dict[str, Any] = {
+                    "segment": [
+                        (float(start[0]), float(start[1])),
+                        (float(end[0]), float(end[1])),
+                    ],
+                }
+                if length_value is not None:
+                    normalized_segment["length"] = length_value
+                if street_value is not None:
+                    normalized_segment["street"] = street_value
+                    street_values.append(street_value)
+                street_segments.append(normalized_segment)
             except Exception:
                 continue
 
@@ -328,6 +349,7 @@ def _load_preprocessed_parcel_geometry(refcat: str, config: Dict[str, Any]) -> O
     return {
         "points": _ensure_closed(points),
         "street_metrics": street_metrics,
+        "street_segments": street_segments,
         "source_file": str(p),
     }
 
@@ -337,6 +359,7 @@ def generate_one(
     poum_gml_path: str,
     output_dir: str | Path,
     municipality_slug: str = "malgrat",
+    include_cadaster_ground: bool = True,
 ) -> Dict[str, Any]:
     """
     Generate a single parcel envelope:
@@ -353,6 +376,7 @@ def generate_one(
     config = _load_config()
     xy = None
     street_metrics: Optional[Dict[str, Any]] = None
+    street_segments: Optional[List[Dict[str, Any]]] = None
     used_preprocess_geometry = False
     preprocess_source_file: Optional[str] = None
 
@@ -361,6 +385,7 @@ def generate_one(
         if pre is not None:
             xy = pre["points"]
             street_metrics = pre.get("street_metrics")
+            street_segments = pre.get("street_segments")
             used_preprocess_geometry = True
             preprocess_source_file = pre.get("source_file")
             if config.get("debug_depth_log"):
@@ -519,7 +544,9 @@ def generate_one(
         ground_height=ground_h,
         depth_m=depth_m,
         max_roof_rise_m=config.get("roof_rise_max_m"),
+        include_cadaster_ground=include_cadaster_ground,
         street_metrics=street_metrics,
+        street_segments=street_segments,
     )
 
     # 6) Normalize (in case exporter writes to a subfolder)

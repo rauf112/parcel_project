@@ -9,6 +9,18 @@ import numpy as np
 import ifcopenshell
 import ifcopenshell.util.placement
 
+try:
+    import ifcopenshell.geom as _ifc_geom  # type: ignore
+except Exception:  # pragma: no cover - environment without geom kernel
+    _ifc_geom = None  # type: ignore
+
+try:
+    from shapely.geometry import Polygon as _ShPolygon  # type: ignore
+    from shapely.ops import unary_union as _sh_unary_union  # type: ignore
+    _HAS_SHAPELY = True
+except Exception:  # pragma: no cover
+    _HAS_SHAPELY = False
+
 from config import POUM_GML_PATH, OUTPUT_DIR
 from pipeline import generate_one
 from ifc_exporter import convex_hull, polygon_intersection
@@ -405,6 +417,104 @@ def _extract_envelope_profile_footprint(path: Path) -> Optional[Dict[str, Any]]:
     }
 
 
+def _projected_outline_from_triangles(
+    model: ifcopenshell.file,
+    products: list[Any],
+    z_min: Optional[float] = None,
+    z_max: Optional[float] = None,
+) -> Optional[list[tuple[float, float]]]:
+    """
+    Build the true (possibly non-convex) XY outline of the given products by
+    tessellating their geometry and unioning the projected triangles.
+
+    Returns the exterior ring of the unioned polygon, or None when the geometry
+    kernel / shapely is unavailable or no usable triangles were produced.
+    """
+    if _ifc_geom is None or not _HAS_SHAPELY or not products:
+        return None
+
+    settings = _ifc_geom.settings()
+    try:
+        settings.set(settings.USE_WORLD_COORDS, True)
+    except Exception:
+        try:
+            settings.set("use-world-coords", True)
+        except Exception:
+            pass
+
+    triangles_2d: list[_ShPolygon] = []
+    for product in products:
+        if getattr(product, "Representation", None) is None:
+            continue
+        try:
+            shape = _ifc_geom.create_shape(settings, product)
+        except Exception:
+            continue
+        try:
+            geom = shape.geometry
+            verts = np.asarray(geom.verts, dtype=float).reshape(-1, 3)
+            faces = np.asarray(geom.faces, dtype=int).reshape(-1, 3)
+        except Exception:
+            continue
+        if verts.size == 0 or faces.size == 0:
+            continue
+        for tri in faces:
+            p0, p1, p2 = verts[tri[0]], verts[tri[1]], verts[tri[2]]
+            if z_min is not None and z_max is not None:
+                # Keep triangles whose centroid is within the requested z-band.
+                cz = (p0[2] + p1[2] + p2[2]) / 3.0
+                if cz < z_min or cz > z_max:
+                    continue
+            ring = [(float(p0[0]), float(p0[1])),
+                    (float(p1[0]), float(p1[1])),
+                    (float(p2[0]), float(p2[1]))]
+            try:
+                poly = _ShPolygon(ring)
+                if not poly.is_valid:
+                    poly = poly.buffer(0)
+                if poly.is_empty or poly.area < 1e-9:
+                    continue
+                triangles_2d.append(poly)
+            except Exception:
+                continue
+
+    if not triangles_2d:
+        return None
+
+    try:
+        merged = _sh_unary_union(triangles_2d)
+    except Exception:
+        return None
+
+    # Pick the largest exterior ring; ignores small slivers / floating fragments.
+    geoms = []
+    if merged.geom_type == "Polygon":
+        geoms = [merged]
+    elif merged.geom_type == "MultiPolygon":
+        geoms = list(merged.geoms)
+    else:
+        return None
+
+    if not geoms:
+        return None
+
+    largest = max(geoms, key=lambda g: g.area)
+    # Light simplification to drop tessellation noise without losing notches.
+    try:
+        simplified = largest.simplify(0.05, preserve_topology=True)
+        if simplified.is_valid and simplified.area > 0:
+            largest = simplified
+    except Exception:
+        pass
+
+    coords = list(largest.exterior.coords)
+    if len(coords) >= 2 and coords[0] == coords[-1]:
+        coords = coords[:-1]
+    if len(coords) < 3:
+        return None
+    return [(float(x), float(y)) for x, y in coords]
+
+
 def _build_ground_perimeter_temp_volume(path: Path, exclude_object_types: set[str] | None = None) -> Dict[str, Any]:
     model = ifcopenshell.open(str(path))
     warnings: list[str] = []
@@ -442,11 +552,6 @@ def _build_ground_perimeter_temp_volume(path: Path, exclude_object_types: set[st
     if len(storey_points) < 3:
         raise RuntimeError("Ground-floor perimeter extraction failed: insufficient vertices.")
 
-    footprint_xy = [(p[0], p[1]) for p in storey_points]
-    footprint_hull = convex_hull(footprint_xy)
-    if len(footprint_hull) < 3:
-        raise RuntimeError("Ground-floor perimeter extraction failed: footprint hull is degenerate.")
-
     main_products = [p for p in model.by_type("IfcProduct") if _is_main_building_product(p)]
     main_points = _extract_world_vertices(model, main_products) if main_products else []
     if not main_points:
@@ -462,6 +567,33 @@ def _build_ground_perimeter_temp_volume(path: Path, exclude_object_types: set[st
     height = max(0.0, z_max - z_min)
     if height <= 0.0:
         raise RuntimeError("Temporary volume height is zero or invalid.")
+
+    # Try true (possibly non-convex) projected outline first. This captures
+    # notches, recesses and L-shaped plans from the architect IFC instead of
+    # over-approximating with a convex hull.
+    footprint_hull: Optional[list[tuple[float, float]]] = None
+    band_top = z_min + min(3.5, max(0.5, 0.4 * height))
+    outline_products = main_products or all_products
+    try:
+        outline = _projected_outline_from_triangles(
+            model, outline_products, z_min=z_min - 0.05, z_max=band_top
+        )
+        if outline and len(outline) >= 3:
+            footprint_hull = outline
+            warnings.append(
+                "Footprint outline extracted via tessellated-triangle union (non-convex aware)."
+            )
+    except Exception as e:
+        warnings.append(
+            f"True outline extraction failed; falling back to convex hull. reason={type(e).__name__}: {e}"
+        )
+
+    if footprint_hull is None:
+        footprint_xy = [(p[0], p[1]) for p in storey_points]
+        footprint_hull = convex_hull(footprint_xy)
+        warnings.append("Footprint outline approximated by convex hull (no triangulated geometry).")
+    if len(footprint_hull) < 3:
+        raise RuntimeError("Ground-floor perimeter extraction failed: footprint hull is degenerate.")
 
     xs = [p[0] for p in footprint_hull]
     ys = [p[1] for p in footprint_hull]
@@ -492,6 +624,54 @@ def _bbox_from_ifc(path: Path) -> BBox3D:
     if not points:
         raise RuntimeError(f"No geometric vertices could be extracted from IFC: {path}")
     return _bbox_from_points(points)
+
+
+def _compute_building_base_z(path: Path) -> Optional[float]:
+    """
+    Lowest world-Z of *building* geometry, excluding terrain/site elements
+    (IfcGeographicElement, IfcSite). Returns None on failure.
+
+    Architect IFCs commonly bury a terrain mesh BELOW the actual ground floor,
+    which makes the global bbox bottom misleading for visual alignment. This
+    helper isolates the real building base so the 3D viewer can place the
+    architect model on top of the cadaster slab cleanly.
+    """
+    if _ifc_geom is None or not path.exists():
+        return None
+    try:
+        import multiprocessing as _mp
+        model = ifcopenshell.open(str(path))
+        settings = _ifc_geom.settings()
+        settings.set(settings.USE_WORLD_COORDS, True)
+        skip_types = {"IfcGeographicElement", "IfcSite"}
+        try:
+            workers = max(1, _mp.cpu_count() - 1)
+        except Exception:
+            workers = 1
+        it = _ifc_geom.iterator(settings, model, workers)
+        if not it.initialize():
+            return None
+        z_min: Optional[float] = None
+        while True:
+            shape = it.get()
+            try:
+                product = model.by_id(shape.id)
+                if product is not None and product.is_a() in skip_types:
+                    if not it.next():
+                        break
+                    continue
+            except Exception:
+                pass
+            verts = shape.geometry.verts
+            if verts:
+                local_min = min(verts[2::3])
+                if z_min is None or local_min < z_min:
+                    z_min = local_min
+            if not it.next():
+                break
+        return float(z_min) if z_min is not None else None
+    except Exception:
+        return None
 
 
 def _intersection_volume(a: BBox3D, b: BBox3D) -> float:
@@ -538,6 +718,7 @@ def run_volume_compliance_check(
         poum_gml_path=str(POUM_GML_PATH),
         output_dir=OUTPUT_DIR,
         municipality_slug=municipality_slug,
+        include_cadaster_ground=True,
     )
 
     if result.get("skipped"):
@@ -556,6 +737,8 @@ def run_volume_compliance_check(
         (allowed_bbox.min_x, allowed_bbox.max_y),
     ]
     allowed_height_m = 1.0
+    allowed_base_z_m = float(allowed_bbox.min_z)
+    project_base_z_m = 0.0
 
     project_polygon_xy: Optional[list[tuple[float, float]]] = None
     intersection_polygon_xy: Optional[list[tuple[float, float]]] = None
@@ -568,6 +751,7 @@ def run_volume_compliance_check(
         if profile_result is not None:
             allowed_polygon_xy = list(profile_result["footprint_hull"])
             allowed_height_m = float(profile_result["height_m"])
+            allowed_base_z_m = float(profile_result["z_min"])
             warnings.extend(profile_result.get("warnings", []))
         else:
             # Fallback: ground perimeter convex hull (no BUILDING_ENVELOPE profile found)
@@ -576,6 +760,7 @@ def run_volume_compliance_check(
             )
             allowed_polygon_xy = list(allowed_temp_volume["footprint_hull"])
             allowed_height_m = float(allowed_temp_volume["height_m"])
+            allowed_base_z_m = float(allowed_temp_volume["z_min"])
             warnings.append("Allowed envelope extracted from ground-floor perimeter (convex hull fallback).")
     except Exception as e:
         warnings.append(f"Allowed IFC footprint extraction failed; using BBox. reason={type(e).__name__}: {e}")
@@ -606,6 +791,7 @@ def run_volume_compliance_check(
 
     try:
         temp_volume = _build_ground_perimeter_temp_volume(architect_path)
+        project_base_z_m = float(temp_volume["z_min"])
 
         project_bbox = BBox3D(
             min_x=float(temp_volume["min_x"]),
@@ -662,6 +848,7 @@ def run_volume_compliance_check(
 
     except Exception as e:
         project_bbox = _bbox_from_ifc(architect_path)
+        project_base_z_m = float(project_bbox.min_z)
         project_volume = project_bbox.volume()
         intersection_volume = _intersection_volume(project_bbox, allowed_bbox)
         outside_volume = max(0.0, project_volume - intersection_volume)
@@ -695,6 +882,13 @@ def run_volume_compliance_check(
     visual_bounds_x = [allowed_bbox.min_x, allowed_bbox.max_x, project_bbox.min_x, project_bbox.max_x]
     visual_bounds_y = [allowed_bbox.min_y, allowed_bbox.max_y, project_bbox.min_y, project_bbox.max_y]
 
+    # Compute true building base Z for the architect IFC, excluding terrain
+    # (IfcGeographicElement / IfcSite). Used by the 3D viewer to align the
+    # architect model on top of the cadaster slab without being thrown off by
+    # a terrain mesh that sits below the actual ground floor.
+    _bbz = _compute_building_base_z(architect_path)
+    architect_building_base_z = float(_bbz) if _bbz is not None else float(project_bbox.min_z)
+
     response: Dict[str, Any] = {
         "compliant": not exceeds,
         "method": method,
@@ -720,6 +914,16 @@ def run_volume_compliance_check(
             "allowed_ifc": str(allowed_ifc_path),
             "architect_ifc": str(architect_path),
             "keep_allowed_ifc": bool(keep_allowed_ifc),
+        },
+        "visual_3d": {
+            "allowed_base_z_m": float(allowed_base_z_m),
+            "allowed_bbox_min_z_m": float(allowed_bbox.min_z),
+            "allowed_base_offset_from_bbox_min_z_m": float(allowed_base_z_m - allowed_bbox.min_z),
+            "architect_base_z_m": float(project_base_z_m),
+            "architect_bbox_min_z_m": float(project_bbox.min_z),
+            "architect_base_offset_from_bbox_min_z_m": float(project_base_z_m - project_bbox.min_z),
+            "architect_building_base_z_m": float(architect_building_base_z),
+            "architect_building_offset_from_bbox_min_z_m": float(architect_building_base_z - project_bbox.min_z),
         },
         "visual": {
             "view": "top_xy",

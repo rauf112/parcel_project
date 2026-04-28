@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Parcel BIM/GIS Automation</title>
+  <title>Building volume generator</title>
   <script type="importmap">
   {
     "imports": {
@@ -110,7 +110,7 @@
 
 <body>
   <div class="wrap">
-    <h1 style="margin:0 0 12px;">Parcel BIM/GIS Automation</h1>
+    <h1 style="margin:0 0 12px;">Building volume generator</h1>
     <div class="grid">
       <div class="card">
         <h2>Generator</h2>
@@ -141,7 +141,7 @@
             </div>
           </div>
 
-          <button id="generateBtn" class="btn" disabled>Generate IFC</button>
+          <button id="generateBtn" class="btn" disabled>Generate Volume (IFC)</button>
 
           <div class="status" id="status"></div>
         </div>
@@ -176,30 +176,20 @@
     </div>
 
     <div class="card" style="margin-top:16px;">
-      <h2>Volume Compliance Check (MVP)</h2>
+      <h2>Volume Compliance Checker</h2>
       <div class="content">
         <div class="row">
-          <label for="checkArchitectIfcPath">Architect IFC path</label>
+          <label for="checkArchitectIfcPath">Applicant's BIM model (IFC4 file)</label>
           <div style="display:flex; gap:8px; align-items:center;">
-            <input id="checkArchitectIfcPath" type="text" placeholder="outputs/architect.ifc" style="flex:1 1 auto;" />
+            <input id="checkArchitectIfcPath" type="text" placeholder="Select the file path" style="flex:1 1 auto;" />
             <button id="checkArchitectIfcBrowseBtn" type="button" class="btn" style="width:auto; white-space:nowrap;">Choose IFC</button>
           </div>
           <input id="checkArchitectIfcFile" type="file" accept=".ifc" style="display:none;" />
-          <div class="small muted" style="margin-top:6px;">Path is resolved by backend. Example: outputs/malgrat_000302300DG70H_23_envelope.ifc</div>
         </div>
 
-        <div style="display:grid; grid-template-columns: 1fr 1fr; gap: 12px;">
-          <div class="row" style="margin-bottom:0;">
-            <label for="checkTolerance">Tolerance (m)</label>
-            <input id="checkTolerance" type="number" step="0.001" min="0" value="0.01" />
-          </div>
-          <div class="checkbox" style="margin: 24px 0 0;">
-            <input type="checkbox" id="checkKeepAllowedIfc" checked />
-            <div>
-              <div style="font-weight:600;">Keep allowed IFC</div>
-              <div class="small muted">If unchecked, temporary allowed IFC will be deleted after check.</div>
-            </div>
-          </div>
+        <div class="row">
+          <label for="checkTolerance">Tolerance (m)</label>
+          <input id="checkTolerance" type="number" step="0.001" min="0" value="0.01" />
         </div>
 
         <button id="checkComplianceBtn" class="btn">Run Volume Compliance Check</button>
@@ -217,13 +207,8 @@
             <div class="viz-toggle-bar">
               <span class="viz-toggle-label">LAYER:</span>
               <button class="viz-toggle-btn active" data-layer="allowed" style="--clr:#2563eb;">&#9654; Allowed</button>
-              <button class="viz-toggle-btn active" data-layer="project" style="--clr:#059669;">&#9654; Architect</button>
+              <button class="viz-toggle-btn active" data-layer="project" style="--clr:#059669;">&#9654; Applicant</button>
               <button class="viz-toggle-btn active" data-layer="intersection" style="--clr:#d97706;">&#9654; Intersection</button>
-            </div>
-            <div class="legend">
-              <div class="legend-item"><span class="legend-dot" style="background:#38bdf860;border:1px solid #0ea5e9;"></span>Allowed Envelope</div>
-              <div class="legend-item"><span class="legend-dot" style="background:#f05a1ecc;border:1px solid #ff8a4c;"></span>Architect Model</div>
-              <div class="legend-item"><span class="legend-dot" style="background:#f59e0b55;border:1px solid #d97706;"></span>Intersection</div>
             </div>
           </div>
         </div>
@@ -311,7 +296,7 @@
   const checkArchitectIfcBrowseBtnEl = document.getElementById("checkArchitectIfcBrowseBtn");
   const checkArchitectIfcFileEl = document.getElementById("checkArchitectIfcFile");
   const checkToleranceEl = document.getElementById("checkTolerance");
-  const checkKeepAllowedIfcEl = document.getElementById("checkKeepAllowedIfc");
+
   const checkComplianceBtn = document.getElementById("checkComplianceBtn");
   const checkStatusEl = document.getElementById("checkStatus");
   const checkResponseEl = document.getElementById("checkResponse");
@@ -428,7 +413,7 @@
       refcatEl.disabled = disableRefcat;
     }
     generateBtn.disabled = isLocked || !canGenerate();
-    generateBtn.textContent = isLocked ? "Generating..." : "Generate IFC";
+    generateBtn.textContent = isLocked ? "Generating..." : "Generate Volume (IFC)";
   }
   function canGenerate() { const m=municipalityEl.value; if(!m)return false; if(allParcelsEl.checked)return true; return !!getRefcatValue(); }
 
@@ -530,7 +515,7 @@
     if(!refcat){setCheckStatus("Select or type a cadastral reference (refcat).","err");return;}
     if(!architectPath){setCheckStatus("architect_ifc_path is required.","err");return;}
     if(!Number.isFinite(tolerance)||tolerance<0){setCheckStatus("Tolerance must be a number >= 0.","err");return;}
-    const body={municipality,refcat,architect_ifc_path:architectPath,tolerance_m:tolerance,keep_allowed_ifc:!!checkKeepAllowedIfcEl.checked};
+    const body={municipality,refcat,architect_ifc_path:architectPath,tolerance_m:tolerance,keep_allowed_ifc:true};
     checkComplianceBtn.disabled=true; setCheckStatus("Running compliance check..."); setCheckResponse("{}");
     try {
       const res=await apiPost("/check/volume-compliance",body);
@@ -653,6 +638,11 @@
     return null;
   }
 
+  function cacheBustUrl(url) {
+    if (!url) return url;
+    return url + (url.includes("?") ? "&" : "?") + `v=${Date.now()}`;
+  }
+
   async function ensureIfcViewer() {
     if (ifcViewer) return ifcViewer;
 
@@ -766,17 +756,62 @@
     const viewer = await ensureIfcViewer();
     setViewer3DStatus(`Loading ${label}...`);
 
-    const model = await viewer.IFC.loadIfcUrl(url);
+    const model = await viewer.IFC.loadIfcUrl(cacheBustUrl(url));
     const modelId = (typeof model?.modelID === "number") ? model.modelID : null;
     if (modelId !== null) loadedModelIds.push(modelId);
     loadedModels.push({ url, label, modelId, model });
+    try { window.loadedModels = loadedModels; } catch {}
 
     const THREE = await import("three");
+
+    const isArchitectModel = /architect/i.test(label);
+
+    // Hide terrain / site geometry from architect IFC at the IFC level. These
+    // elements (IfcGeographicElement, IfcSite) sit BELOW the building floor in
+    // world Z and would otherwise drag the model bbox down, leaving the
+    // building floating above the cadaster slab in the viewer.
+    // Numeric IFC type codes (stable across web-ifc versions):
+    //   IFCSITE              = 4097777520
+    //   IFCGEOGRAPHICELEMENT = 4095615018
+    if (isArchitectModel && modelId !== null) {
+      try {
+        const ifcManager = viewer.IFC.loader.ifcManager;
+        const typeCodes = [4097777520, 4095615018];
+        const idsToHide = [];
+        for (const code of typeCodes) {
+          try {
+            const ids = await ifcManager.getAllItemsOfType(modelId, code, false);
+            if (Array.isArray(ids)) idsToHide.push(...ids);
+          } catch {}
+        }
+        if (idsToHide.length > 0) {
+          if (typeof ifcManager.hideItems === "function") {
+            ifcManager.hideItems(modelId, idsToHide);
+          } else if (typeof ifcManager.removeFromSubset === "function") {
+            try { ifcManager.removeFromSubset(modelId, idsToHide); } catch {}
+          }
+        }
+      } catch (err) {
+        console.warn("[3D] terrain hide step failed:", err);
+      }
+    }
 
     // Center models: all share the same XZ offset (from first model) to preserve relative positions
     try {
       model.updateMatrixWorld(true);
-      const box = new THREE.Box3().expandByObject(model);
+      // Compute bbox over VISIBLE meshes only. THREE.Box3.expandByObject
+      // includes invisible children, so it would still see the hidden terrain.
+      const box = new THREE.Box3();
+      let any = false;
+      model.traverse((obj) => {
+        if (!obj?.isMesh || !obj.geometry) return;
+        const mb = new THREE.Box3().setFromObject(obj);
+        if (mb.isEmpty()) return;
+        if (obj.visible === false) return;
+        box.union(mb);
+        any = true;
+      });
+      if (!any) box.expandByObject(model);
       if (!box.isEmpty() && isFinite(box.min.x)) {
         if (!firstModelCenter) {
           // First model: record the XZ center as the shared reference
@@ -788,50 +823,100 @@
         // All models use the same XZ offset so relative positions are preserved
         model.position.x -= firstModelCenter.x;
         model.position.z -= firstModelCenter.z;
-        model.position.y -= box.min.y;  // ground slab bottom at Y=0
+        // Vertical drop: put bbox bottom at y=0 (terrain already hidden for architect).
+        model.position.y -= box.min.y;
         model.updateMatrixWorld(true);
+
+        // Lift architect onto the top of the cadaster slab (allowed envelope base).
+        // The architect IFC may have a terrain mesh below the building's actual
+        // ground floor — `box.min.y` reflects the terrain bottom, not the
+        // building base. The backend exposes
+        // `architect_building_offset_from_bbox_min_z_m` (= terrain depth, in m)
+        // and `allowed_base_offset_from_bbox_min_z_m` (= cadaster slab height).
+        // Final shift puts the building base exactly on the cadaster top.
+        if (isArchitectModel) {
+          const meta = lastComplianceResponse?.visual_3d || {};
+          const cadasterHeight = Number(meta.allowed_base_offset_from_bbox_min_z_m || 0);
+          const buildingOffset = Number(meta.architect_building_offset_from_bbox_min_z_m || 0);
+          const shift = cadasterHeight - buildingOffset;
+          if (isFinite(shift) && Math.abs(shift) > 1e-4) {
+            model.position.y += shift;
+            model.updateMatrixWorld(true);
+          }
+        }
       }
-    } catch {}
+    } catch (err) {
+      console.warn(`[3D] grounding pass failed for ${label}:`, err);
+    }
 
     // Style model: distinct colors per role
+    // For "Allowed Envelope" the IFC carries per-element IfcSurfaceStyle (real envelope vs virtual roof),
+    // so we keep web-ifc's native materials and only add edge helpers + adjust transparency flags.
     try {
       const isAllowed = /allowed|envelope/i.test(label);
-      // Architect: vivid terracotta-orange (clearly not yellow)
-      // Allowed:   sky blue, semi-transparent (glass-box feel)
-      const mainHex   = isAllowed ? 0x38bdf8 : 0xf05a1e;
-      const mainAlpha = isAllowed ? 0.38 : 0.93;
-      const edgeHex   = isAllowed ? 0x0ea5e9 : 0xff8a4c;
-      const edgeAlpha = isAllowed ? 0.80 : 0.50;
 
-      model.traverse((obj) => {
-        if (!obj?.isMesh) return;
-        const newMat = new THREE.MeshStandardMaterial({
-          color: new THREE.Color(mainHex),
-          transparent: mainAlpha < 1,
-          opacity: mainAlpha,
-          side: THREE.DoubleSide,
-          depthWrite: mainAlpha > 0.5,
-          roughness: isAllowed ? 0.45 : 0.75,
-          metalness: isAllowed ? 0.05 : 0.0,
+      if (isAllowed) {
+        model.traverse((obj) => {
+          if (!obj?.isMesh) return;
+          const fixMat = (m) => {
+            if (!m) return;
+            // web-ifc imports IfcSurfaceStyleRendering.Transparency into m.opacity (0..1).
+            // Ensure transparency flag is set so the material actually renders see-through.
+            if (typeof m.opacity === "number" && m.opacity < 1.0) {
+              m.transparent = true;
+              m.depthWrite = m.opacity > 0.5;
+            }
+            m.side = THREE.DoubleSide;
+            m.needsUpdate = true;
+          };
+          if (Array.isArray(obj.material)) obj.material.forEach(fixMat);
+          else fixMat(obj.material);
+
+          if (obj.geometry) {
+            try {
+              const edges = new THREE.EdgesGeometry(obj.geometry, 25);
+              const line = new THREE.LineSegments(edges, new THREE.LineBasicMaterial({
+                color: 0x0ea5e9, transparent: true, opacity: 0.55,
+              }));
+              line.userData._edgeHelper = true;
+              obj.add(line);
+            } catch {}
+          }
         });
-        if (Array.isArray(obj.material)) {
-          obj.material.forEach(m => m.dispose?.());
-          obj.material = [newMat];
-        } else {
-          obj.material?.dispose?.();
-          obj.material = newMat;
-        }
-        if (obj.geometry) {
-          try {
-            const edges = new THREE.EdgesGeometry(obj.geometry, 25);
-            const line = new THREE.LineSegments(edges, new THREE.LineBasicMaterial({
-              color: edgeHex, transparent: true, opacity: edgeAlpha,
-            }));
-            line.userData._edgeHelper = true;
-            obj.add(line);
-          } catch {}
-        }
-      });
+      } else {
+        // Architect: vivid terracotta-orange override (architect IFCs may not carry styles).
+        const mainHex = 0xf05a1e, mainAlpha = 0.93;
+        const edgeHex = 0xff8a4c, edgeAlpha = 0.50;
+        model.traverse((obj) => {
+          if (!obj?.isMesh) return;
+          const newMat = new THREE.MeshStandardMaterial({
+            color: new THREE.Color(mainHex),
+            transparent: mainAlpha < 1,
+            opacity: mainAlpha,
+            side: THREE.DoubleSide,
+            depthWrite: mainAlpha > 0.5,
+            roughness: 0.75,
+            metalness: 0.0,
+          });
+          if (Array.isArray(obj.material)) {
+            obj.material.forEach(m => m.dispose?.());
+            obj.material = [newMat];
+          } else {
+            obj.material?.dispose?.();
+            obj.material = newMat;
+          }
+          if (obj.geometry) {
+            try {
+              const edges = new THREE.EdgesGeometry(obj.geometry, 25);
+              const line = new THREE.LineSegments(edges, new THREE.LineBasicMaterial({
+                color: edgeHex, transparent: true, opacity: edgeAlpha,
+              }));
+              line.userData._edgeHelper = true;
+              obj.add(line);
+            } catch {}
+          }
+        });
+      }
     } catch {}
 
     // Grid + camera: use BUILDING HEIGHT for camera distance (ignore wide parcel footprint)

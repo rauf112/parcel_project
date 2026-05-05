@@ -214,6 +214,33 @@
         </div>
 
         <div class="small muted">MVP note: method may be <span class="mono">ground_floor_perimeter_temp_volume</span> or fallback <span class="mono">bbox</span>; both are approximate checks.</div>
+
+        <!-- ── Clashing Elements ── -->
+        <div style="margin-top:18px; border-top:1px solid #334155; padding-top:14px;">
+          <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
+            <button id="clashCheckBtn" class="btn" style="background:#7c3aed;" title="Run only after Volume Compliance Check">&#9889; Check Clashing Elements</button>
+            <span class="status" id="clashStatus" style="flex:1;"></span>
+          </div>
+          <div id="clashResults" style="display:none; margin-top:10px;">
+            <div class="small muted" style="margin-bottom:6px;">
+              Elements exceeding the envelope — <span id="clashSummary"></span>
+            </div>
+            <div style="max-height:280px; overflow-y:auto; border:1px solid #334155; border-radius:6px;">
+              <table id="clashTable" style="width:100%; border-collapse:collapse; font-size:11px;">
+                <thead>
+                  <tr style="background:#1e293b; position:sticky; top:0;">
+                    <th style="padding:6px 8px; text-align:left; color:#94a3b8; font-weight:600;">Type</th>
+                    <th style="padding:6px 8px; text-align:left; color:#94a3b8; font-weight:600;">Name</th>
+                    <th style="padding:6px 8px; text-align:right; color:#94a3b8; font-weight:600;">Max side (m)</th>
+                    <th style="padding:6px 8px; text-align:right; color:#94a3b8; font-weight:600;">Z overflow (m)</th>
+                    <th style="padding:6px 8px; text-align:right; color:#94a3b8; font-weight:600;">W/E/S/N (m)</th>
+                  </tr>
+                </thead>
+                <tbody id="clashTableBody"></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
 
@@ -228,9 +255,9 @@
       <!-- Load buttons row -->
       <div class="v-load-row">
         <span class="v-label">Model:</span>
-        <button id="loadArchitect3DBtn" class="v-btn primary">&#9654; Architect</button>
-        <button id="loadAllowed3DBtn" class="v-btn primary">&#9654; Allowed</button>
-        <button id="loadBoth3DBtn" class="v-btn primary">&#9654; Both</button>
+        <button id="loadArchitect3DBtn" class="v-btn">&#9654; Architectural</button>
+        <button id="loadAllowed3DBtn" class="v-btn">&#9654; Building Services</button>
+        <button id="loadOverhangs3DBtn" class="v-btn" disabled title="Coming soon: overhangs/cantilevers volume">&#9654; Overhangs</button>
         <button id="clear3DBtn" class="v-btn danger">&#10005; Clear</button>
       </div>
 
@@ -540,6 +567,21 @@
       const res = await apiUpload("/upload/architect-ifc", formData);
       checkArchitectIfcPathEl.value = res.relative_path || res.path || "";
       setCheckStatus(`Uploaded: ${res.file}`, "ok");
+
+      // Auto-refresh viewer: clear everything then reload previously visible models
+      const newArchUrl = toIfcUrl(checkArchitectIfcPathEl.value);
+      const wasArchVisible = loadedModels.some(m => m.label === "Architectural Volume" && m.model?.visible !== false);
+      const wasAllowedVisible = loadedModels.some(m => m.label === "Building Services Volume" && m.model?.visible !== false);
+      const allowedUrl = toIfcUrl(lastComplianceResponse?.sources?.allowed_ifc);
+      if (wasArchVisible || wasAllowedVisible) {
+        await clearIfcViewer();
+        if (wasArchVisible && newArchUrl) {
+          try { await loadIfcInViewer(newArchUrl, "Architectural Volume"); loadArchitect3DBtn.classList.add("active"); } catch {}
+        }
+        if (wasAllowedVisible && allowedUrl) {
+          try { await loadIfcInViewer(allowedUrl, "Building Services Volume"); loadAllowed3DBtn.classList.add("active"); } catch {}
+        }
+      }
     } catch (e) {
       let parsed = null; try { parsed = e?.text ? JSON.parse(e.text) : null; } catch {}
       const detail = parsed?.detail || prettyServiceError(e);
@@ -584,6 +626,80 @@
     await uploadArchitectIfc(file);
   });
 
+  // ── Clash check ──
+  const clashCheckBtn = document.getElementById("clashCheckBtn");
+  const clashStatusEl = document.getElementById("clashStatus");
+  const clashResultsEl = document.getElementById("clashResults");
+  const clashSummaryEl = document.getElementById("clashSummary");
+  const clashTableBodyEl = document.getElementById("clashTableBody");
+
+  function renderClashResults(data) {
+    clashTableBodyEl.innerHTML = "";
+    if (!data || !data.elements) { clashResultsEl.style.display = "none"; return; }
+    const count = data.clashing_count || 0;
+    const total = data.total_elements_checked || 0;
+    clashSummaryEl.textContent = `${count} clashing / ${total} checked (tolerance: ${data.tolerance_m} m)`;
+    clashResultsEl.style.display = count > 0 ? "block" : "block";
+
+    if (count === 0) {
+      clashTableBodyEl.innerHTML = `<tr><td colspan="5" style="padding:10px 8px; color:#4ade80; text-align:center;">✔ No clashing elements found.</td></tr>`;
+      return;
+    }
+
+    data.elements.forEach((el, i) => {
+      const maxSide = Math.max(el.overflow_west_m, el.overflow_east_m, el.overflow_south_m, el.overflow_north_m);
+      const rowBg = i % 2 === 0 ? "#0f172a" : "#1e293b";
+      const sides = `${el.overflow_west_m}/${el.overflow_east_m}/${el.overflow_south_m}/${el.overflow_north_m}`;
+      const shortType = (el.type || "").replace(/^Ifc/, "");
+      const row = document.createElement("tr");
+      row.style.background = rowBg;
+      row.innerHTML = `
+        <td style="padding:5px 8px; color:#f87171; font-weight:600;">${shortType}</td>
+        <td style="padding:5px 8px; color:#e2e8f0; max-width:160px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="${el.name}">${el.name || "—"}</td>
+        <td style="padding:5px 8px; text-align:right; color:${maxSide > 0.05 ? '#fbbf24' : '#94a3b8'};">${maxSide.toFixed(4)}</td>
+        <td style="padding:5px 8px; text-align:right; color:${el.overflow_z_top_m > 0.05 ? '#fb923c' : '#64748b'};">${el.overflow_z_top_m}</td>
+        <td style="padding:5px 8px; text-align:right; color:#64748b; font-size:10px;">${sides}</td>
+      `;
+      clashTableBodyEl.appendChild(row);
+    });
+  }
+
+  clashCheckBtn.addEventListener("click", async () => {
+    const architectPath = (checkArchitectIfcPathEl.value || "").trim();
+    if (!architectPath) {
+      clashStatusEl.textContent = "⚠ Upload an Architect IFC first.";
+      clashStatusEl.style.color = "#f87171";
+      return;
+    }
+    const envelopePath = lastComplianceResponse?.sources?.allowed_ifc;
+    if (!envelopePath) {
+      clashStatusEl.textContent = "⚠ Run Volume Compliance Check first to generate the envelope.";
+      clashStatusEl.style.color = "#f87171";
+      return;
+    }
+    clashCheckBtn.disabled = true;
+    clashStatusEl.textContent = "Running element clash check…";
+    clashStatusEl.style.color = "#94a3b8";
+    clashResultsEl.style.display = "none";
+    try {
+      const result = await apiPost("/clash/elements", {
+        architect_ifc_path: architectPath,
+        envelope_ifc_path: envelopePath,
+        tolerance_m: parseFloat(document.getElementById("checkTolerance").value || "0.01"),
+      });
+      renderClashResults(result);
+      const n = result.clashing_count || 0;
+      clashStatusEl.textContent = n > 0 ? `⚠ ${n} element(s) exceed the envelope.` : "✔ All elements are within the envelope.";
+      clashStatusEl.style.color = n > 0 ? "#fbbf24" : "#4ade80";
+    } catch (e) {
+      const detail = e?.parsed?.detail || e?.text || String(e);
+      clashStatusEl.textContent = `Error: ${detail}`;
+      clashStatusEl.style.color = "#f87171";
+    } finally {
+      clashCheckBtn.disabled = false;
+    }
+  });
+
 
   /* ═══════════════════════════════════════════════════════════════════════
      PROFESSIONAL IFC 3D VIEWER — BIMRocket-style
@@ -593,7 +709,6 @@
   const viewerModelInfoEl = document.getElementById("viewerModelInfo");
   const loadArchitect3DBtn = document.getElementById("loadArchitect3DBtn");
   const loadAllowed3DBtn = document.getElementById("loadAllowed3DBtn");
-  const loadBoth3DBtn = document.getElementById("loadBoth3DBtn");
   const clear3DBtn = document.getElementById("clear3DBtn");
   const vFitBtn = document.getElementById("vFitBtn");
   const vFrontBtn = document.getElementById("vFrontBtn");
@@ -745,6 +860,8 @@
     vClipBtn.classList.remove("active");
     vWireBtn.classList.remove("active");
     vTransBtn.classList.remove("active");
+    loadArchitect3DBtn.classList.remove("active");
+    loadAllowed3DBtn.classList.remove("active");
 
     ifc3DContainerEl.querySelectorAll(':scope > :not(.v-props-panel)').forEach(el => el.remove());
     setViewer3DStatus("Ready");
@@ -770,13 +887,17 @@
     // elements (IfcGeographicElement, IfcSite) sit BELOW the building floor in
     // world Z and would otherwise drag the model bbox down, leaving the
     // building floating above the cadaster slab in the viewer.
+    // Also hide IfcSpace in all models — space volumes are abstract room
+    // boundaries that show as wireframe blobs and obscure the real geometry.
     // Numeric IFC type codes (stable across web-ifc versions):
     //   IFCSITE              = 4097777520
     //   IFCGEOGRAPHICELEMENT = 4095615018
-    if (isArchitectModel && modelId !== null) {
+    //   IFCSPACE             = 3651124850
+    if (modelId !== null) {
       try {
         const ifcManager = viewer.IFC.loader.ifcManager;
-        const typeCodes = [4097777520, 4095615018];
+        const typeCodes = [3651124850]; // hide IfcSpace for all models
+        if (isArchitectModel) typeCodes.push(4097777520, 4095615018); // also hide terrain for architect
         const idsToHide = [];
         for (const code of typeCodes) {
           try {
@@ -792,7 +913,7 @@
           }
         }
       } catch (err) {
-        console.warn("[3D] terrain hide step failed:", err);
+        console.warn("[3D] element hide step failed:", err);
       }
     }
 
@@ -853,13 +974,31 @@
     // For "Allowed Envelope" the IFC carries per-element IfcSurfaceStyle (real envelope vs virtual roof),
     // so we keep web-ifc's native materials and only add edge helpers + adjust transparency flags.
     try {
-      const isAllowed = /allowed|envelope/i.test(label);
+      const isAllowed = /allowed|envelope|building\s*services/i.test(label);
 
       if (isAllowed) {
         model.traverse((obj) => {
           if (!obj?.isMesh) return;
+
+          // Check if this mesh belongs to a VirtualRoof element (walk up parent chain)
+          let isVirtualRoof = false;
+          let node = obj;
+          while (node) {
+            if (node.name && /virtual.*roof/i.test(node.name)) { isVirtualRoof = true; break; }
+            node = node.parent;
+          }
+
           const fixMat = (m) => {
             if (!m) return;
+            if (isVirtualRoof) {
+              // VirtualRoof: very transparent so it doesn't dominate the view
+              m.transparent = true;
+              m.opacity = 0.12;
+              m.depthWrite = false;
+              m.side = THREE.DoubleSide;
+              m.needsUpdate = true;
+              return;
+            }
             // web-ifc imports IfcSurfaceStyleRendering.Transparency into m.opacity (0..1).
             // Ensure transparency flag is set so the material actually renders see-through.
             if (typeof m.opacity === "number" && m.opacity < 1.0) {
@@ -1154,36 +1293,44 @@
     vPropsBtn.classList.remove("active");
   });
 
+  /* ─── Toggle a model: load on first click, then show/hide on subsequent clicks ─── */
+  async function toggleModel(btn, label, urlGetter) {
+    const existing = loadedModels.find(m => m.label === label);
+    if (existing) {
+      const nowVisible = !existing.model.visible;
+      existing.model.visible = nowVisible;
+      btn.classList.toggle("active", nowVisible);
+      const visibleLabels = loadedModels.filter(m => m.model.visible).map(m => m.label).join(" + ");
+      setModelInfo(visibleLabels ? `Models: ${visibleLabels}` : "");
+      setViewer3DStatus(nowVisible ? `Showing: ${label}` : `Hidden: ${label}`, "ok");
+      return;
+    }
+    // First time: load the model
+    const url = urlGetter();
+    if (!url) return;
+    try {
+      await loadIfcInViewer(url, label);
+      btn.classList.add("active");
+    } catch (e) {
+      setViewer3DStatus(`Failed: ${e?.message || e}`, "err");
+    }
+  }
+
   /* ─── Load button handlers ─── */
   loadArchitect3DBtn.addEventListener("click", async () => {
-    try {
-      const url = toIfcUrl(checkArchitectIfcPathEl.value);
-      if (!url) { setViewer3DStatus("Architect IFC path must point to outputs/.. or a public URL.", "err"); return; }
-      await loadIfcInViewer(url, "Architect");
-    } catch (e) { setViewer3DStatus(`Failed: ${e?.message || e}`, "err"); }
+    const url = toIfcUrl(checkArchitectIfcPathEl.value);
+    if (!url && !loadedModels.find(m => m.label === "Architectural Volume")) {
+      setViewer3DStatus("Architect IFC path must point to outputs/.. or a public URL.", "err"); return;
+    }
+    await toggleModel(loadArchitect3DBtn, "Architectural Volume", () => toIfcUrl(checkArchitectIfcPathEl.value));
   });
 
   loadAllowed3DBtn.addEventListener("click", async () => {
-    try {
-      const allowedPath = lastComplianceResponse?.sources?.allowed_ifc;
-      const url = toIfcUrl(allowedPath);
-      if (!url) { setViewer3DStatus("Run compliance check first to get allowed IFC path.", "err"); return; }
-      await loadIfcInViewer(url, "Allowed Envelope");
-    } catch (e) { setViewer3DStatus(`Failed: ${e?.message || e}`, "err"); }
-  });
-
-  loadBoth3DBtn.addEventListener("click", async () => {
-    try {
-      const archUrl = toIfcUrl(checkArchitectIfcPathEl.value);
-      const allowedPath = lastComplianceResponse?.sources?.allowed_ifc;
-      const allowedUrl = toIfcUrl(allowedPath);
-      if (!archUrl) { setViewer3DStatus("Architect IFC path required.", "err"); return; }
-      if (!allowedUrl) { setViewer3DStatus("Run compliance check first.", "err"); return; }
-      await clearIfcViewer();
-      await loadIfcInViewer(archUrl, "Architect");
-      await loadIfcInViewer(allowedUrl, "Allowed Envelope");
-      setViewer3DStatus("Both models loaded in same scene.", "ok");
-    } catch (e) { setViewer3DStatus(`Failed: ${e?.message || e}`, "err"); }
+    const allowedPath = lastComplianceResponse?.sources?.allowed_ifc;
+    if (!toIfcUrl(allowedPath) && !loadedModels.find(m => m.label === "Building Services Volume")) {
+      setViewer3DStatus("Run compliance check first to get allowed IFC path.", "err"); return;
+    }
+    await toggleModel(loadAllowed3DBtn, "Building Services Volume", () => toIfcUrl(lastComplianceResponse?.sources?.allowed_ifc));
   });
 
   clear3DBtn.addEventListener("click", async () => { await clearIfcViewer(); });
@@ -1194,10 +1341,19 @@
     await loadMunicipalities();
     setJobState("idle"); setProgress01(0); setLogs([]); setFiles([]);
     generateBtn.disabled = true;
-    checkArchitectIfcPathEl.value = "outputs/malgrat_000302300DG70H_23_envelope.ifc";
+    checkArchitectIfcPathEl.value = "";
     setCheckResponse("{}");
     renderComplianceViz(null);
     setViewer3DStatus("Ready");
+
+    // Auto-load Building Services envelope on page open (a known envelope IFC exists)
+    const defaultEnvelopeUrl = toIfcUrl("outputs/malgrat_000302300DG70H_23_envelope.ifc");
+    if (defaultEnvelopeUrl) {
+      try {
+        await loadIfcInViewer(defaultEnvelopeUrl, "Building Services Volume");
+        loadAllowed3DBtn.classList.add("active");
+      } catch {}
+    }
   })();
 </script>
 </body>

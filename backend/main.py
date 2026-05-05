@@ -34,7 +34,7 @@ from config import POUM_GML_PATH, OUTPUT_DIR, DEFAULT_MUNICIPALITIES
 from jobs import create_job, get_job, append_log, Job
 from pipeline import list_refcats_from_poum, generate_one
 from simplify_cadastre_like import generate_simplified_cadastre_like_file
-from volume_compliance import run_volume_compliance_check
+from volume_compliance import run_volume_compliance_check, run_element_clash_check
 
 app = FastAPI(title="Parcel BIM/GIS Automation API", version="1.0")
 
@@ -112,6 +112,12 @@ class VolumeComplianceRequest(BaseModel):
     architect_ifc_path: str
     tolerance_m: Optional[float] = 0.01
     keep_allowed_ifc: Optional[bool] = True
+
+
+class ElementClashRequest(BaseModel):
+    architect_ifc_path: str
+    envelope_ifc_path: str
+    tolerance_m: Optional[float] = 0.01
 
 
 @app.get("/municipalities")
@@ -333,6 +339,30 @@ def post_volume_compliance(req: VolumeComplianceRequest) -> Dict[str, Any]:
         raise HTTPException(status_code=500, detail=f"Volume compliance processing failed: {e}")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Volume compliance check failed: {e}")
+
+
+@app.post("/clash/elements")
+def post_element_clash(req: ElementClashRequest) -> Dict[str, Any]:
+    architect_path = Path(req.architect_ifc_path).expanduser().resolve()
+    if not architect_path.exists():
+        raise HTTPException(status_code=404, detail=f"Architect IFC not found: {architect_path}")
+
+    envelope_path = Path(req.envelope_ifc_path).expanduser().resolve()
+    if not envelope_path.exists():
+        raise HTTPException(status_code=404, detail=f"Envelope IFC not found: {envelope_path}")
+
+    try:
+        return run_element_clash_check(
+            architect_ifc_path=str(architect_path),
+            envelope_ifc_path=str(envelope_path),
+            tolerance_m=float(req.tolerance_m if req.tolerance_m is not None else 0.01),
+        )
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Element clash check failed: {e}")
 
 
 # -------- Batch tuning knobs --------

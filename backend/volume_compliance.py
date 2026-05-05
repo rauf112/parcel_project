@@ -952,3 +952,225 @@ def run_volume_compliance_check(
             pass
 
     return response
+
+
+# =============================================================================
+# Element-level clash check
+# =============================================================================
+
+def run_element_clash_check(
+    *,
+    architect_ifc_path: str,
+    envelope_ifc_path: str,
+    tolerance_m: float = 0.01,
+) -> Dict[str, Any]:
+    """
+    Check each IFC element in the architect model against the allowed envelope polygon.
+
+    For each element that has geometry the function:
+    - Projects its world bounding box onto the XY plane
+    - Checks how much area of that bounding box falls outside the envelope polygon
+    - Checks how much the element extends above the envelope maximum height
+    - Reports elements where either overflow > tolerance_m
+
+    Returns a dict with a list of clashing elements and summary counts.
+    """
+    if not _HAS_SHAPELY:
+        raise RuntimeError("Shapely is required for element clash detection.")
+
+    architect_path = Path(architect_ifc_path).expanduser().resolve()
+    envelope_path = Path(envelope_ifc_path).expanduser().resolve()
+
+    if not architect_path.exists():
+        raise FileNotFoundError(f"Architect IFC not found: {architect_path}")
+    if not envelope_path.exists():
+        raise FileNotFoundError(f"Envelope IFC not found: {envelope_path}")
+
+    warnings_out: list[str] = []
+
+    # ------------------------------------------------------------------
+    # 1. Extract allowed envelope polygon + height
+    # ------------------------------------------------------------------
+    allowed_polygon_xy: list[tuple[float, float]] = []
+    allowed_z_min = 0.0
+    allowed_height_m = 0.0
+
+    try:
+        profile_result = _extract_envelope_profile_footprint(envelope_path)
+        if profile_result is not None:
+            allowed_polygon_xy = list(profile_result["footprint_hull"])
+            allowed_z_min = float(profile_result["z_min"])
+            allowed_height_m = float(profile_result["height_m"])
+            warnings_out.extend(profile_result.get("warnings", []))
+        else:
+            temp = _build_ground_perimeter_temp_volume(envelope_path, exclude_object_types={"CADASTER_GROUND"})
+            allowed_polygon_xy = list(temp["footprint_hull"])
+            allowed_z_min = float(temp["z_min"])
+            allowed_height_m = float(temp["height_m"])
+            warnings_out.extend(temp.get("warnings", []))
+    except Exception as e:
+        raise RuntimeError(f"Failed to extract envelope polygon: {type(e).__name__}: {e}")
+
+    if len(allowed_polygon_xy) < 3:
+        raise RuntimeError("Envelope polygon has fewer than 3 points.")
+
+    allowed_shapely = _ShPolygon(allowed_polygon_xy)
+    if not allowed_shapely.is_valid:
+        allowed_shapely = allowed_shapely.buffer(0)
+
+    # ------------------------------------------------------------------
+    # 2. Determine XY coordinate alignment offset
+    # ------------------------------------------------------------------
+    align_dx, align_dy = 0.0, 0.0
+    arch_z_min = 0.0
+
+    def _centroid_local(poly: list[tuple[float, float]]) -> tuple[float, float]:
+        n = len(poly)
+        return (sum(p[0] for p in poly) / n, sum(p[1] for p in poly) / n)
+
+    def _bbox_of_local(poly: list[tuple[float, float]]) -> tuple[float, float, float, float]:
+        xs = [p[0] for p in poly]; ys = [p[1] for p in poly]
+        return min(xs), min(ys), max(xs), max(ys)
+
+    def _bboxes_overlap_local(a: list[tuple[float, float]], b: list[tuple[float, float]], threshold: float = 0.1) -> bool:
+        ax0, ay0, ax1, ay1 = _bbox_of_local(a)
+        bx0, by0, bx1, by1 = _bbox_of_local(b)
+        ox = max(0.0, min(ax1, bx1) - max(ax0, bx0))
+        oy = max(0.0, min(ay1, by1) - max(ay0, by0))
+        aw = max(1e-9, ax1 - ax0) * max(1e-9, ay1 - ay0)
+        return (ox * oy) / aw > threshold
+
+    try:
+        temp_vol = _build_ground_perimeter_temp_volume(architect_path)
+        arch_footprint: list[tuple[float, float]] = temp_vol["footprint_hull"]
+        arch_z_min = float(temp_vol["z_min"])
+        warnings_out.extend(temp_vol.get("warnings", []))
+
+        if not _bboxes_overlap_local(allowed_polygon_xy, arch_footprint):
+            ac = _centroid_local(allowed_polygon_xy)
+            pc = _centroid_local(arch_footprint)
+            align_dx = ac[0] - pc[0]
+            align_dy = ac[1] - pc[1]
+            warnings_out.append(
+                f"Coordinate system mismatch detected. Alignment offset applied: "
+                f"dx={align_dx:.3f} m, dy={align_dy:.3f} m."
+            )
+    except Exception as e:
+        warnings_out.append(f"Could not compute arch footprint for alignment: {type(e).__name__}: {e}")
+
+    arch_model = ifcopenshell.open(str(architect_path))
+
+    # When coordinate alignment was applied, the centroid shift introduces a
+    # residual offset that appears identically on all elements (same side, same value).
+    # Expand the envelope polygon by the alignment distance so that alignment
+    # artefacts are absorbed and only genuine overflows remain.
+    if abs(align_dx) > 1e-4 or abs(align_dy) > 1e-4:
+        align_dist = math.hypot(align_dx, align_dy)
+        try:
+            expanded = allowed_shapely.buffer(align_dist)
+            if expanded.is_valid and not expanded.is_empty:
+                allowed_shapely = expanded
+                # Also expand the bbox bounds used for per-side overflow
+                ax0_e, ay0_e, ax1_e, ay1_e = _bbox_of_local(allowed_polygon_xy)
+                # Store as module-level-like vars to use in loop (recomputed from polygon anyway)
+                allowed_polygon_xy = list(expanded.exterior.coords[:-1])
+                warnings_out.append(
+                    f"Envelope expanded by {align_dist:.4f} m to absorb alignment uncertainty. "
+                    f"Only overflows larger than this are reported."
+                )
+        except Exception:
+            pass
+
+    # ------------------------------------------------------------------
+    # 3. Per-element check
+    # ------------------------------------------------------------------
+    _SKIP_TYPES = {
+        "IfcSpace", "IfcGrid", "IfcSite", "IfcBuilding", "IfcBuildingStorey",
+        "IfcAnnotation", "IfcOpeningElement", "IfcVirtualElement",
+    }
+    _SKIP_PREFIXES = ("IfcFlow", "IfcDistribution", "IfcFurnishing")
+
+    tol = float(tolerance_m)
+
+    clashing: list[Dict[str, Any]] = []
+    total_checked = 0
+
+    for product in arch_model.by_type("IfcProduct"):
+        cls = product.is_a()
+        if cls in _SKIP_TYPES:
+            continue
+        if any(cls.startswith(pfx) for pfx in _SKIP_PREFIXES):
+            continue
+        if getattr(product, "Representation", None) is None:
+            continue
+
+        pts = _extract_world_vertices(arch_model, [product])
+        if not pts:
+            continue
+
+        total_checked += 1
+
+        # Apply XY alignment
+        xs = [x + align_dx for x, y, z in pts]
+        ys = [y + align_dy for x, y, z in pts]
+        zs = [z for x, y, z in pts]
+
+        e_min_x, e_max_x = min(xs), max(xs)
+        e_min_y, e_max_y = min(ys), max(ys)
+        e_min_z, e_max_z = min(zs), max(zs)
+
+        # XY overflow: per-side overflow is the primary check (robust against bbox inflation).
+        # Area is computed secondarily for informational display.
+        a_min_x, a_min_y, a_max_x, a_max_y = _bbox_of_local(allowed_polygon_xy)
+        overflow_west  = max(0.0, a_min_x - e_min_x)
+        overflow_east  = max(0.0, e_max_x - a_max_x)
+        overflow_south = max(0.0, a_min_y - e_min_y)
+        overflow_north = max(0.0, e_max_y - a_max_y)
+        max_side_overflow = max(overflow_west, overflow_east, overflow_south, overflow_north)
+
+        # Z overflow: element height vs allowed height (coordinate-system independent)
+        elem_height_m = max(0.0, e_max_z - e_min_z)
+        overflow_z_top_m = max(0.0, elem_height_m - allowed_height_m)
+
+        # Clashing: at least one side OR Z exceeds tolerance
+        is_clashing = (max_side_overflow > tol) or (overflow_z_top_m > tol)
+        if not is_clashing:
+            continue
+
+        # Compute actual XY area outside envelope (informational)
+        elem_bbox_poly = _ShPolygon([
+            (e_min_x, e_min_y), (e_max_x, e_min_y),
+            (e_max_x, e_max_y), (e_min_x, e_max_y),
+        ])
+        try:
+            outside = elem_bbox_poly.difference(allowed_shapely)
+            overflow_xy_m2 = float(outside.area) if not outside.is_empty else 0.0
+        except Exception:
+            overflow_xy_m2 = 0.0
+
+        clashing.append({
+            "id": product.id(),
+            "global_id": str(getattr(product, "GlobalId", "") or ""),
+            "type": cls,
+            "name": str(getattr(product, "Name", "") or ""),
+            "overflow_xy_m2": round(overflow_xy_m2, 4),
+            "overflow_z_top_m": round(overflow_z_top_m, 4),
+            "overflow_west_m": round(overflow_west, 4),
+            "overflow_east_m": round(overflow_east, 4),
+            "overflow_south_m": round(overflow_south, 4),
+            "overflow_north_m": round(overflow_north, 4),
+        })
+
+    # Sort: largest side overflow first
+    clashing.sort(key=lambda e: max(e["overflow_west_m"], e["overflow_east_m"],
+                                    e["overflow_south_m"], e["overflow_north_m"]), reverse=True)
+
+    return {
+        "total_elements_checked": total_checked,
+        "clashing_count": len(clashing),
+        "tolerance_m": tol,
+        "align_dx": round(align_dx, 4),
+        "align_dy": round(align_dy, 4),
+        "warnings": warnings_out,
+        "elements": clashing,
+    }
